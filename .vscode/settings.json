@@ -1,0 +1,8 @@
+{
+	"C_Cpp.default.compilerPath": "d:\\02_tools\\mingw64\\bin\\gcc.exe",
+	"files.associations": {
+		"stdio.h": "c",
+		"stdbool.h": "c",
+		"random": "c"
+	}
+}
