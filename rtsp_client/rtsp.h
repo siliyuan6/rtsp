@@ -7,10 +7,10 @@
 #define STRINGIFY(x) #x
 #define TO_STRING(x) STRINGIFY(x)
 
-#define RTSP_SERVER_IP "192.168.1.2"
+#define RTSP_SERVER_IP "192.168.0.107"
 #define RTSP_SERVER_PORT 8554
 #define RTSP_SERVER_URL "rtsp://" RTSP_SERVER_IP ":"                          \
-                              TO_STRING(RTSP_SERVER_PORT) "/live1"
+                              TO_STRING(RTSP_SERVER_PORT) "/live"
 
 #define RTSP_REQUEST_OPTION                                                   \
         "OPTIONS " RTSP_SERVER_URL " RTSP/1.0\r\n"                            \
@@ -52,17 +52,18 @@
         "Session: %s\r\n"                                                     \
         "\r\n"
 
-typedef struct {
-    pthread_t thread_id;        // thread id for RTSP communication
-    int thread_status;          // thread status for RTSP communication
+typedef struct
+{
+    pthread_t thread_id;        // RTSP线程ID
+    int thread_status;          // RTSP线程状态
 
-    int rtsp_wsa_flag;          // flag for Winsock initialization
-    int rtsp_fd;                // socket for RTSP communication
-    char session_id[32];        // session id for RTSP communication
-    char rtsp_send_buf[1024];   // buffer for sending RTSP message
-    char rtsp_recv_buf[1024];   // buffer for receiving RTSP message
+    int rtsp_wsa_flag;          // Winsock初始化标志
+    int rtsp_fd;                // RTSP通信套接字
+    char session_id[32];        // RTSP会话ID
+    char rtsp_send_buf[1024];   // RTSP发送缓冲区
+    char rtsp_recv_buf[1024];   // RTSP接收缓冲区
 
-    rtp_t *rtp_ctx;             // RTP context for RTP communication
+    rtp_t *rtp_ctx;             // RTP上下文
 
 } rtsp_clinet_t;
 
