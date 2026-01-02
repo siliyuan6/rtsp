@@ -1,3 +1,11 @@
+/**
+ * @file rtp.h
+ * @brief RTP/RTCP协议处理头文件
+ * 
+ * 本文件定义了RTP/RTCP数据包解析相关的数据结构和函数接口。
+ * 支持H.264视频流的RTP封装格式解析和重组。
+ */
+
 #ifndef RTP_H
 #define RTP_H
 
@@ -87,6 +95,7 @@ typedef struct
     int last_frame_type;            // 上一帧类型
     int last_last_frame_type;       // 上上一帧类型
     player_t player;                // 管道播放上下文
+    size_t total_written;           // 已写入文件的总字节数
 
 } rtp_t;
 

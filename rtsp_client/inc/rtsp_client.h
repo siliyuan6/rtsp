@@ -1,5 +1,13 @@
-#ifndef RTSP_H
-#define RTSP_H
+/**
+ * @file rtsp_client.h
+ * @brief RTSP客户端头文件
+ * 
+ * 本文件定义了RTSP客户端的数据结构和常量，用于与RTSP服务器通信。
+ * 支持标准的RTSP协议流程：OPTIONS -> DESCRIBE -> SETUP -> PLAY -> TEARDOWN
+ */
+
+#ifndef RTSP_CLIENT_H
+#define RTSP_CLIENT_H
 
 #include <pthread.h>
 #include "rtp.h"
@@ -7,8 +15,9 @@
 #define STRINGIFY(x) #x
 #define TO_STRING(x) STRINGIFY(x)
 
-#define RTSP_SERVER_IP "192.168.0.107"
-#define RTSP_SERVER_PORT 8554
+// RTSP服务器配置（可根据实际情况修改）
+#define RTSP_SERVER_IP "192.168.0.103"     // RTSP服务器IP地址
+#define RTSP_SERVER_PORT 8554              // RTSP服务器端口
 #define RTSP_SERVER_URL "rtsp://" RTSP_SERVER_IP ":"                          \
                               TO_STRING(RTSP_SERVER_PORT) "/live"
 
@@ -52,19 +61,28 @@
         "Session: %s\r\n"                                                     \
         "\r\n"
 
+/**
+ * @brief RTSP客户端上下文结构体
+ * 
+ * 包含RTSP客户端运行所需的所有状态信息，包括：
+ * - 网络连接信息（套接字、会话ID等）
+ * - 线程管理信息
+ * - RTP上下文指针
+ */
 typedef struct
 {
-    pthread_t thread_id;        // RTSP线程ID
-    int thread_status;          // RTSP线程状态
+    pthread_t thread_id;        // RTSP工作线程ID
+    int thread_status;          // RTSP线程运行状态（TRUE/FALSE）
 
-    int rtsp_wsa_flag;          // Winsock初始化标志
-    int rtsp_fd;                // RTSP通信套接字
-    char session_id[32];        // RTSP会话ID
-    char rtsp_send_buf[1024];   // RTSP发送缓冲区
-    char rtsp_recv_buf[1024];   // RTSP接收缓冲区
+    int rtsp_wsa_flag;          // Winsock初始化标志（Windows平台）
+    int rtsp_fd;                // RTSP TCP通信套接字文件描述符
+    char session_id[32];        // RTSP会话ID（从SETUP响应中获取）
+    char rtsp_send_buf[1024];   // RTSP请求发送缓冲区
+    char rtsp_recv_buf[1024];   // RTSP响应接收缓冲区
 
-    rtp_t *rtp_ctx;             // RTP上下文
+    rtp_t *rtp_ctx;             // RTP/RTCP上下文指针
 
-} rtsp_clinet_t;
+} rtsp_client_t;
 
-#endif
+#endif /* RTSP_CLIENT_H */
+

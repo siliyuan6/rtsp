@@ -1,22 +1,50 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <signal.h>
+#include <pthread.h>
+
+#ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#else
+#include <unistd.h>
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#define closesocket close
+#define SOCKET int
+#define INVALID_SOCKET (-1)
+#endif
 
-#include "rtsp.h"
+#include "rtsp_client.h"
 #include "rtp.h"
+#include "log.h"
+
+#ifndef TRUE
+#define TRUE 1
+#endif
+#ifndef FALSE
+#define FALSE 0
+#endif
 
 volatile sig_atomic_t running_flag = TRUE;
 
-// 从SETUP响应中解析Session ID
+/**
+ * @brief 从SETUP响应中解析Session ID
+ * @param response RTSP响应字符串
+ * @param session_id 输出参数，用于存储解析得到的Session ID
+ * @return 成功返回0，失败返回-1
+ */
 int rtsp_get_session_id(const char *response, char *session_id)
 {
     // 从SETUP响应中提取Session ID
     const char *session_id_str = strstr(response, "Session: ");
     if (session_id_str == NULL)
     {
-        printf("Failed to extract session ID from SETUP response\n");
+        LOG_ERR("Failed to extract session ID from SETUP response\n");
         return -1;
     }
     
@@ -30,24 +58,28 @@ int rtsp_get_session_id(const char *response, char *session_id)
     }
     else
     {
-        printf("Failed to extract session ID\n");
+        LOG_ERR("Failed to extract session ID\n");
         return -1;
     }
 
     return 0;
 }
 
-// 发送RTSP请求报文
-int rtsp_request(rtsp_clinet_t *ctx)
+/**
+ * @brief 发送RTSP请求报文到服务器
+ * @param ctx RTSP客户端上下文指针
+ * @return 成功返回0，失败返回-1
+ */
+int rtsp_request(rtsp_client_t *ctx)
 {
-    printf("==========Request start==========\n");
-    printf("%s", ctx->rtsp_send_buf);
-    printf("\n==========end==========\n");
+    // LOG("==========Request start==========\n");
+    // LOG("%s", ctx->rtsp_send_buf);
+    // LOG("\n==========end==========\n");
     int ret = send(ctx->rtsp_fd, ctx->rtsp_send_buf
                 , strlen(ctx->rtsp_send_buf), 0);
     if (ret < 0)
     {
-        printf("Send failed. ret:%d, fd:%d, len:%d. \n"
+        LOG_ERR("Send failed. ret:%d, fd:%d, len:%zu. \n"
             , ret
             , ctx->rtsp_fd
             , strlen(ctx->rtsp_send_buf));
@@ -56,8 +88,12 @@ int rtsp_request(rtsp_clinet_t *ctx)
     return 0;
 }
 
-// 接收RTSP响应报文
-int rtsp_receive(rtsp_clinet_t *ctx)
+/**
+ * @brief 接收RTSP服务器响应报文
+ * @param ctx RTSP客户端上下文指针
+ * @return 成功返回0，失败返回-1
+ */
+int rtsp_receive(rtsp_client_t *ctx)
 {
     int recv_len = recv(ctx->rtsp_fd
                         , ctx->rtsp_recv_buf
@@ -66,54 +102,71 @@ int rtsp_receive(rtsp_clinet_t *ctx)
     if (recv_len > 0)
     {
         ctx->rtsp_recv_buf[recv_len] = '\0';
-        printf("==========Response start==========\n");
-        printf("%s", ctx->rtsp_recv_buf);
-        printf("\n==========end==========\n");
+        // LOG("==========Response start==========\n");
+        // LOG("%s", ctx->rtsp_recv_buf);
+        // LOG("\n==========end==========\n");
         return 0;
     }
     else
     {
-        printf("Receive failed\n");
+        LOG_ERR("Receive failed\n");
         return -1;
     }
 }
 
-// 创建RTSP客户端上下文并连接服务器
+/**
+ * @brief 创建RTSP客户端上下文并连接到服务器
+ * 
+ * 该函数会：
+ * 1. 初始化Winsock（Windows平台）
+ * 2. 创建TCP套接字
+ * 3. 连接到RTSP服务器
+ * 
+ * @param ctx 输出参数，返回创建的RTSP客户端上下文指针
+ * @return 成功返回0，失败返回-1
+ */
 int rtsp_create(void **ctx)
 {
     int ret = 0;
+    rtsp_client_t *rtsp_ctx = NULL;
+
+#ifdef _WIN32
     WSADATA wsaData;
-    rtsp_clinet_t *rtsp_ctx = NULL;
+#endif
 
     if (ctx == NULL)
     {
-        printf("ctx == null\n");
+        LOG_ERR("ctx == null\n");
         return -1;
     }
 
-    rtsp_ctx = (rtsp_clinet_t *)malloc(sizeof(rtsp_clinet_t));
+    rtsp_ctx = (rtsp_client_t *)malloc(sizeof(rtsp_client_t));
     if (rtsp_ctx == NULL)
     {
-        printf("malloc failed\n");
+        LOG_ERR("malloc failed\n");
         return -1;
     }
-    memset(rtsp_ctx, 0, sizeof(rtsp_clinet_t));
+    memset(rtsp_ctx, 0, sizeof(rtsp_client_t));
 
+#ifdef _WIN32
     // 初始化Winsock
     ret = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (ret != 0)
     {
-        printf("WSAStartup failed\n");
+        LOG_ERR("WSAStartup failed\n");
         return -1;
     }
     rtsp_ctx->rtsp_wsa_flag = 1;
+#endif
 
     // 创建TCP套接字
     rtsp_ctx->rtsp_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (rtsp_ctx->rtsp_fd == INVALID_SOCKET)
+    if ((SOCKET)rtsp_ctx->rtsp_fd == INVALID_SOCKET)
     {
-        printf("Socket creation failed\n");
+        LOG_ERR("Socket creation failed\n");
+#ifdef _WIN32
         WSACleanup();
+#endif
         return -1;
     }
 
@@ -129,57 +182,76 @@ int rtsp_create(void **ctx)
         , (struct sockaddr*)&server_addr, sizeof(server_addr));
     if (ret < 0)
     {
-        printf("Connect failed. ret:%d.\n", ret);
+        LOG_ERR("Connect failed. ret:%d.\n", ret);
         closesocket(rtsp_ctx->rtsp_fd);
+#ifdef _WIN32
         WSACleanup();
+#endif
         return -1;
     }
 
-    printf("RTSP create success. rtsp_fd:%d. \n", rtsp_ctx->rtsp_fd);
+    LOG("RTSP create success. rtsp_fd:%d. \n", rtsp_ctx->rtsp_fd);
 
     *ctx = rtsp_ctx;
 
     return 0;
 }
 
-// 释放RTSP客户端资源
+/**
+ * @brief 释放RTSP客户端资源并关闭连接
+ * @param ctx RTSP客户端上下文指针
+ * @return 成功返回0
+ */
 int rtsp_destroy(void *ctx)
 {
-    rtsp_clinet_t *rtsp_ctx = (rtsp_clinet_t *)ctx;
+    rtsp_client_t *rtsp_ctx = (rtsp_client_t *)ctx;
 
     if (rtsp_ctx->rtsp_fd)
     {
         closesocket(rtsp_ctx->rtsp_fd);
     }
 
+#ifdef _WIN32
     if (rtsp_ctx->rtsp_wsa_flag)
     {
         WSACleanup();
         rtsp_ctx->rtsp_wsa_flag = 0;
     }
+#endif
 
     if (rtsp_ctx)
     {
         free(rtsp_ctx);
     }
 
-    printf("RTSP destroy success.\n");
+    LOG("RTSP destroy success.\n");
 
     return 0;
 }
 
-// RTSP工作线程：完成建连、收包与RTP解析
-void * rtsp_work(void *args)
+/**
+ * @brief RTSP工作线程主函数
+ * 
+ * 该线程负责：
+ * 1. 执行完整的RTSP协议流程（OPTIONS -> DESCRIBE -> SETUP -> PLAY）
+ * 2. 接收和解析RTP/RTCP数据包
+ * 3. 定期发送保活请求
+ * 4. 优雅关闭连接（TEARDOWN）
+ * 
+ * @param args RTSP客户端上下文指针
+ * @return 成功返回(void*)0，失败返回(void*)-1
+ */
+void *rtsp_work(void *args)
 {
     int ret = 0;
     char str_port0[16];
     char str_port1[16];
-    rtsp_clinet_t *ctx = (rtsp_clinet_t *)args;
+    rtsp_client_t *ctx = (rtsp_client_t *)args;
     
     ret = rtp_create((void *)&ctx->rtp_ctx);
     if (ret < 0)
     {
-        printf("RTP create failed\n");
+        LOG_ERR("RTP create failed\n");
         return (void *)-1;
     }
 
@@ -191,7 +263,7 @@ void * rtsp_work(void *args)
 
     // 发送RTSP请求
     memset(ctx->rtsp_send_buf, 0, sizeof(ctx->rtsp_send_buf));
-    strncpy(ctx->rtsp_send_buf, RTSP_REQUEST_OPTION
+    memcpy(ctx->rtsp_send_buf, RTSP_REQUEST_OPTION
             , strlen(RTSP_REQUEST_OPTION));
     if (rtsp_request(ctx) < 0)
     {
@@ -205,7 +277,7 @@ void * rtsp_work(void *args)
     }
 
     memset(ctx->rtsp_send_buf, 0, sizeof(ctx->rtsp_send_buf));
-    strncpy(ctx->rtsp_send_buf, RTSP_REQUEST_DESCRIBE
+    memcpy(ctx->rtsp_send_buf, RTSP_REQUEST_DESCRIBE
             , strlen(RTSP_REQUEST_DESCRIBE));
     if (rtsp_request(ctx) < 0)
     {
@@ -282,10 +354,10 @@ void * rtsp_work(void *args)
         {
             if (rtsp_request(ctx) < 0)
             {
-                printf("RTSP disconnect!\n");
+                LOG_ERR("RTSP disconnect!\n");
                 goto EXIT_FAIL;
             }
-            printf("RTSP keepalive\n");
+            LOG("RTSP keepalive\n");
             last_time = time(NULL);
         }
 
@@ -298,7 +370,11 @@ void * rtsp_work(void *args)
         FD_ZERO(&readfds);
         FD_SET(rtp_ctx->rtp_fd[0], &readfds);
         FD_SET(rtp_ctx->rtp_fd[1], &readfds);
+#ifdef _WIN32
         int nsel = select(0, &readfds, NULL, NULL, &tv);
+#else
+        int nsel = select(rtp_ctx->rtp_fd[1] + 1, &readfds, NULL, NULL, &tv);
+#endif
         if (nsel > 0 && FD_ISSET(rtp_ctx->rtp_fd[0], &readfds))
         {
             int len = recvfrom(rtp_ctx->rtp_fd[0]
@@ -307,7 +383,7 @@ void * rtsp_work(void *args)
                                 , 0, NULL, NULL);
             if (len <= 0)
             {
-                printf("RTP recv len:%d\n", len);
+                LOG_ERR("RTP recv len:%d\n", len);
             }
             rtp_pkg_parse((void *)rtp_ctx, rtp_ctx->rtp_recv_buf, len);
         }
@@ -319,7 +395,7 @@ void * rtsp_work(void *args)
                                 , 0, NULL, NULL);
             if (len <= 0)
             {
-                printf("RTCP recv len:%d\n", len);
+                LOG_ERR("RTCP recv len:%d\n", len);
             }
             rtcp_pkg_parse(rtp_ctx->rtp_recv_buf, len);
         }
@@ -347,25 +423,36 @@ EXIT_FAIL:
     return (void *)-1;
 }
 
-// SIGINT信号处理：通知线程退出
+/**
+ * @brief SIGINT信号处理函数
+ * 
+ * 当用户按下Ctrl+C时，设置运行标志为FALSE，通知工作线程退出
+ * @param sig 信号编号（未使用）
+ */
 void handle_sigint(int sig)
 {
+    (void)sig;  // 未使用的参数，避免警告
     running_flag = FALSE;
 }
 
-// 程序入口：创建RTSP客户端并启动工作线程
+/**
+ * @brief 程序主入口
+ * 
+ * 创建RTSP客户端，启动工作线程，等待线程结束并清理资源
+ * @return 成功返回0，失败返回-1
+ */
 int main(void)
 {
     signal(SIGINT, handle_sigint);
     setvbuf(stdout, NULL, _IONBF, 0);
 
     int ret = 0;
-    rtsp_clinet_t *ctx = NULL;
+    rtsp_client_t *ctx = NULL;
 
     ret = rtsp_create((void **)&ctx);
     if (ret < 0)
     {
-        printf("RTSP create failed\n");
+        LOG_ERR("RTSP create failed\n");
         return -1;
     }
 
@@ -374,7 +461,7 @@ int main(void)
     ret = pthread_create(&ctx->thread_id, NULL, rtsp_work, (void *)ctx);
     if (ret != 0)
     {
-        printf("pthread_create failed\n");
+        LOG_ERR("pthread_create failed\n");
         rtsp_destroy(ctx);
         return -1;
     }
