@@ -33,17 +33,21 @@
 #define SLICE_END       3   // 多包尾包
 
 /**
- * @brief 绑定RTP/RTCP本地端口并创建UDP套接字
+ * @brief 创建UDP套接字并绑定到指定端口
  * @param rtp_ctx RTP上下文指针（未使用，保留接口一致性）
  * @param port 要绑定的端口号
  * @return 成功返回套接字文件描述符，失败返回-1
  */
-static int rtp_bind_port(rtp_t *rtp_ctx, int port)
+static int rtp_udp_create(int port)
 {
-    (void)rtp_ctx;  // 未使用的参数，避免警告
     int ret = 0;
 
     // 创建UDP套接字
+    // AF_INET - IPv4 Internet protocols
+    // AF_INET6 - IPv6 Internet protocols
+    // SOCK_STREAM - 提供面向连接的字节流服务的套接字类型，用于TCP
+    // SOCK_DGRAM - 提供数据报服务的套接字类型，用于UDP
+    // SOCK_RAW - 提供原始网络协议访问的套接字类型
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if ((SOCKET)sock == INVALID_SOCKET)
     {
@@ -52,6 +56,8 @@ static int rtp_bind_port(rtp_t *rtp_ctx, int port)
     }
 
     // 设置套接字选项，允许地址重用
+    // SOL_SOCKET - 套接字级别选项
+    // SO_REUSEADDR - 允许重用本地地址和端口
     int reuse = 1;
     ret = setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (char*)&reuse, sizeof(reuse));
     if (ret != 0)
@@ -125,16 +131,16 @@ int rtp_create(void **ctx)
         rtp_ctx->rtp_listen_port[0] = 0;
         rtp_ctx->rtp_listen_port[1] = 0;
 
-        int rtp_fd0 = rtp_bind_port(rtp_ctx, port);
+        int rtp_fd0 = rtp_udp_create(port);
         if (rtp_fd0 < 0)
         {
             continue;
         }
         
-        int rtp_fd1 = rtp_bind_port(rtp_ctx, port + 1);
+        int rtp_fd1 = rtp_udp_create(port + 1);
         if (rtp_fd1 < 0)
         {
-            closesocket(rtp_fd0);
+            rtp_udp_destroy(rtp_fd0);
             continue;
         }
         
@@ -201,12 +207,12 @@ int rtp_destroy(void *ctx)
 
     if (rtp_ctx->rtp_fd[0])
     {
-        closesocket(rtp_ctx->rtp_fd[0]);
+        rtp_udp_destroy(rtp_ctx->rtp_fd[0]);
     }
 
     if (rtp_ctx->rtp_fd[1])
     {
-        closesocket(rtp_ctx->rtp_fd[1]);
+        rtp_udp_destroy(rtp_ctx->rtp_fd[1]);
     }
     
     player_close(&rtp_ctx->player);

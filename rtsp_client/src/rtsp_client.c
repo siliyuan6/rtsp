@@ -14,6 +14,7 @@
 #include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <errno.h>
 #define closesocket close
 #define SOCKET int
 #define INVALID_SOCKET (-1)
@@ -72,9 +73,9 @@ int rtsp_get_session_id(const char *response, char *session_id)
  */
 int rtsp_request(rtsp_client_t *ctx)
 {
-    // LOG("==========Request start==========\n");
-    // LOG("%s", ctx->rtsp_send_buf);
-    // LOG("\n==========end==========\n");
+    LOG("==========Request start==========\n");
+    LOG("%s", ctx->rtsp_send_buf);
+    LOG("\n==========end==========\n");
     int ret = send(ctx->rtsp_fd, ctx->rtsp_send_buf
                 , strlen(ctx->rtsp_send_buf), 0);
     if (ret < 0)
@@ -102,9 +103,9 @@ int rtsp_receive(rtsp_client_t *ctx)
     if (recv_len > 0)
     {
         ctx->rtsp_recv_buf[recv_len] = '\0';
-        // LOG("==========Response start==========\n");
-        // LOG("%s", ctx->rtsp_recv_buf);
-        // LOG("\n==========end==========\n");
+        LOG("==========Response start==========\n");
+        LOG("%s", ctx->rtsp_recv_buf);
+        LOG("==========end==========\n");
         return 0;
     }
     else
@@ -254,6 +255,9 @@ void *rtsp_work(void *args)
         LOG_ERR("RTP create failed\n");
         return (void *)-1;
     }
+    LOG("RTP create success. rtp_fd[0]:%d, rtp_fd[1]:%d. \n"
+        , ctx->rtp_ctx->rtp_fd[0]
+        , ctx->rtp_ctx->rtp_fd[1]);
 
     // 监听端口转换为字符串
     snprintf(str_port0, sizeof(str_port0), "%d"
@@ -296,6 +300,7 @@ void *rtsp_work(void *args)
             , RTSP_REQUEST_SETUP_TRACK1
             , str_port0
             , str_port1);
+    LOG("Sending SETUP request (track0) with client_port=%s-%s\n", str_port0, str_port1);
     if (rtsp_request(ctx) < 0)
     {
         goto EXIT_FAIL;
@@ -320,6 +325,7 @@ void *rtsp_work(void *args)
         , str_port0
         , str_port1
         , ctx->session_id);
+    LOG("Sending SETUP request (track1) with client_port=%s-%s\n", str_port0, str_port1);
     if (rtsp_request(ctx) < 0)
     {
         goto EXIT_FAIL;
@@ -373,31 +379,77 @@ void *rtsp_work(void *args)
 #ifdef _WIN32
         int nsel = select(0, &readfds, NULL, NULL, &tv);
 #else
-        int nsel = select(rtp_ctx->rtp_fd[1] + 1, &readfds, NULL, NULL, &tv);
+        // 使用两个文件描述符中较大的那个 + 1
+        int max_fd = (rtp_ctx->rtp_fd[0] > rtp_ctx->rtp_fd[1]) ? 
+                     rtp_ctx->rtp_fd[0] : rtp_ctx->rtp_fd[1];
+        int nsel = select(max_fd + 1, &readfds, NULL, NULL, &tv);
 #endif
-        if (nsel > 0 && FD_ISSET(rtp_ctx->rtp_fd[0], &readfds))
+        if (nsel < 0)
+        {
+            LOG_ERR("select failed, errno:%d\n", errno);
+            continue;
+        }
+        
+        // 检查 RTP socket
+        if ((nsel > 0) && FD_ISSET(rtp_ctx->rtp_fd[0], &readfds))
         {
             int len = recvfrom(rtp_ctx->rtp_fd[0]
                                 , rtp_ctx->rtp_recv_buf
                                 , rtp_ctx->rtp_recv_len
                                 , 0, NULL, NULL);
-            if (len <= 0)
+            if (len > 0)
             {
-                LOG_ERR("RTP recv len:%d\n", len);
+                static int packet_count = 0;
+                packet_count++;
+                if (packet_count <= 10 || packet_count % 100 == 0)
+                {
+                    LOG("Received RTP packet #%d, len=%d\n", packet_count, len);
+                }
+                rtp_pkg_parse((void *)rtp_ctx, rtp_ctx->rtp_recv_buf, len);
             }
-            rtp_pkg_parse((void *)rtp_ctx, rtp_ctx->rtp_recv_buf, len);
+            else if (len < 0)
+            {
+#ifdef _WIN32
+                int err = WSAGetLastError();
+                if (err != WSAEWOULDBLOCK && err != WSAEINTR)
+                {
+                    LOG_ERR("RTP recvfrom failed, WSAGetLastError:%d\n", err);
+                }
+#else
+                if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
+                {
+                    LOG_ERR("RTP recvfrom failed, errno:%d\n", errno);
+                }
+#endif
+            }
         }
-        else if (nsel > 0 && FD_ISSET(rtp_ctx->rtp_fd[1], &readfds))
+        
+        // 检查 RTCP socket
+        if ((nsel > 0) && FD_ISSET(rtp_ctx->rtp_fd[1], &readfds))
         {
             int len = recvfrom(rtp_ctx->rtp_fd[1]
                                 , rtp_ctx->rtp_recv_buf
                                 , rtp_ctx->rtp_recv_len
                                 , 0, NULL, NULL);
-            if (len <= 0)
+            if (len > 0)
             {
-                LOG_ERR("RTCP recv len:%d\n", len);
+                rtcp_pkg_parse(rtp_ctx->rtp_recv_buf, len);
             }
-            rtcp_pkg_parse(rtp_ctx->rtp_recv_buf, len);
+            else if (len < 0)
+            {
+#ifdef _WIN32
+                int err = WSAGetLastError();
+                if (err != WSAEWOULDBLOCK && err != WSAEINTR)
+                {
+                    LOG_ERR("RTCP recvfrom failed, WSAGetLastError:%d\n", err);
+                }
+#else
+                if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
+                {
+                    LOG_ERR("RTCP recvfrom failed, errno:%d\n", errno);
+                }
+#endif
+            }
         }
     }
 

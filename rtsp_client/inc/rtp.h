@@ -78,9 +78,8 @@ typedef enum
 typedef struct
 {
     int rtp_wsa_flag;               // Winsock初始化标志
-    int rtp_listen_port[2];         // RTP/RTCP监听端口
-    int rtp_fd[2];                  // RTP/RTCP套接字
-                                    // 0: RTP; 1: RTCP
+    int rtp_listen_port[2];         // 监听端口 - 0: RTP; 1: RTCP
+    int rtp_fd[2];                  // 套接字 - 0: RTP; 1: RTCP
     void *rtp_recv_buf;             // RTP接收缓冲区
     int rtp_recv_len;               // RTP接收长度
 

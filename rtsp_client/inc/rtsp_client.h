@@ -23,40 +23,40 @@
 
 #define RTSP_REQUEST_OPTION                                                   \
         "OPTIONS " RTSP_SERVER_URL " RTSP/1.0\r\n"                            \
-        "CSeq: 2\r\n"                                                         \
+        "CSeq: 1\r\n"                                                         \
         "User-Agent: LibVLC/3.0.21 (LIVE555 Streaming Media v2016.11.28)\r\n" \
         "\r\n"
 
 #define RTSP_REQUEST_DESCRIBE                                                 \
         "DESCRIBE " RTSP_SERVER_URL " RTSP/1.0\r\n"                           \
-        "CSeq: 3\r\n"                                                         \
+        "CSeq: 2\r\n"                                                         \
         "User-Agent: rtsp_client\r\n"                                         \
         "Accept: application/sdp\r\n"                                         \
         "\r\n"
 
 #define RTSP_REQUEST_SETUP_TRACK1                                             \
-        "SETUP " RTSP_SERVER_URL "/track1 RTSP/1.0\r\n"                       \
-        "CSeq: 4\r\n"                                                         \
+        "SETUP " RTSP_SERVER_URL "/track0 RTSP/1.0\r\n"                       \
+        "CSeq: 3\r\n"                                                         \
         "User-Agent: LibVLC/3.0.21 (LIVE555 Streaming Media v2016.11.28)\r\n" \
         "Transport: RTP/AVP;unicast;client_port=%s-%s\r\n"                    \
         "\r\n"
 
 #define RTSP_REQUEST_SETUP_TRACK2                                             \
-        "SETUP " RTSP_SERVER_URL "/track2 RTSP/1.0\r\n"                       \
-        "CSeq: 5\r\n"                                                         \
+        "SETUP " RTSP_SERVER_URL "/track1 RTSP/1.0\r\n"                       \
+        "CSeq: 4\r\n"                                                         \
         "Transport: RTP/AVP;unicast;client_port=%s-%s\r\n"                    \
         "Session: %s\r\n"                                                     \
         "\r\n"
 
 #define RTSP_REQUEST_PLAY                                                     \
         "PLAY " RTSP_SERVER_URL " RTSP/1.0\r\n"                               \
-        "CSeq: 6\r\n"                                                         \
+        "CSeq: 5\r\n"                                                         \
         "Session: %s\r\n"                                                     \
         "\r\n"
 
 #define RTSP_REQUEST_TEARDOWN                                                 \
         "TEARDOWN " RTSP_SERVER_URL " RTSP/1.0\r\n"                           \
-        "CSeq: 7\r\n"                                                         \
+        "CSeq: 6\r\n"                                                         \
         "User-Agent: LibVLC/3.0.21 (LIVE555 Streaming Media v2016.11.28)\r\n" \
         "Session: %s\r\n"                                                     \
         "\r\n"
