@@ -7,10 +7,10 @@
 
 ## 命名规范
 
-5. 采用驼峰命名变量（camelCase）
-6. 函数名采用下划线命名（snake_case），如：`handle_client()`
+5. 采用小驼峰命名变量（camelCase）
+6. 函数名采用大驼峰命名（HandleClient），如：`HandleClient()`
 7. 宏定义和常量使用全大写字母，单词间用下划线分隔，如：`MAX_REQUEST_SIZE`
-8. 结构体类型名使用下划线命名，并以`_t`结尾，如：`rtp_header_t`
+8. 结构体类型名使用下划线命名，并以`_t`结尾，如：`RtpHeader_t`
 9. 静态函数使用`static`关键字修饰
 10. 文件名使用小写字母和下划线
 
