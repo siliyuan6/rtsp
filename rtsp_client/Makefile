@@ -21,7 +21,8 @@ else
 endif
 
 # 编译器设置
-CC = gcc
+# aarch64-linux-gnu-gcc
+CC = aarch64-linux-gnu-gcc
 
 # 目录设置
 SRC_DIR = src

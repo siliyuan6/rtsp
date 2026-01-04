@@ -1,8 +1,9 @@
 # 设置编译器
-CC = gcc
+# aarch64-linux-gnu-gcc
+CC = aarch64-linux-gnu-gcc
 
 # 编译选项
-CFLAGS = -Wall -g
+CFLAGS = -Wall -g -pthread
 
 # 目标文件
 TARGET = rtsp_server
@@ -12,8 +13,8 @@ SRCS = rtsp_server.c
 
 # 生成目标文件
 $(TARGET): $(SRCS)
-	$(CC) $(CFLAGS) -o $(TARGET) $(SRCS) -lws2_32
+	$(CC) $(CFLAGS) -o $(TARGET) $(SRCS)
 
 # 清理生成的文件
 clean:
-	del $(TARGET).exe
+	rm -f $(TARGET)

@@ -25,7 +25,6 @@
 #define RTP_RECV_LEN 5*1024*1024
 #define RTP_STREAM_FILENAME "tmp_stream.h264"
 // #define RTP_DEBUG_ENABLE  // 打开调试打印
-#define rtp_stream_process_ENABLE
 
 #define SLICE_NORMAL    0	// 常规单包
 #define SLICE_START     1   // 多包开始
@@ -83,6 +82,18 @@ static int rtp_udp_create(int port)
     }
 
     return sock;
+}
+
+/**
+ * @brief 关闭UDP套接字
+ * @param sock 要关闭的套接字文件描述符
+ */
+static void rtp_udp_destroy(int sock)
+{
+    if (sock)
+    {
+        closesocket(sock);
+    }
 }
 
 /**
@@ -170,18 +181,11 @@ int rtp_create(void **ctx)
     rtp_ctx->last_last_frame_type = -1;
     rtp_ctx->total_written = 0;
 
-#ifdef rtp_stream_process_ENABLE
     // 初始化时删除旧文件，重新开始记录
     remove(rtp_ctx->stream_filename);
     LOG("Stream file will be saved to: %s\n", rtp_ctx->stream_filename);
-#endif
 
     LOG("RTP create success.\n");
-
-    if (player_open(&rtp_ctx->player, PLAYER_COMMAND) < 0)
-    {
-        LOG_ERR("player_open failed; playback will remain disabled.\n");
-    }
 
     *ctx = rtp_ctx;
 
@@ -215,9 +219,6 @@ int rtp_destroy(void *ctx)
         rtp_udp_destroy(rtp_ctx->rtp_fd[1]);
     }
     
-    player_close(&rtp_ctx->player);
-    
-#ifdef rtp_stream_process_ENABLE
     if (rtp_ctx->total_written > 0)
     {
         LOG("Total %zu bytes written to %s\n", rtp_ctx->total_written, rtp_ctx->stream_filename);
@@ -226,7 +227,6 @@ int rtp_destroy(void *ctx)
     {
         LOG_ERR("No data written to stream file: %s\n", rtp_ctx->stream_filename);
     }
-#endif
     
 #ifdef _WIN32
     if (rtp_ctx->rtp_wsa_flag)
@@ -284,7 +284,6 @@ int rtp_stream_process(void *ctx, const void *buffer, int len)
     LOG("==========done==========\n");
 #endif
 
-#ifdef rtp_stream_process_ENABLE
     rtp_ctx->fd = fopen(rtp_ctx->stream_filename, "ab");
     if (rtp_ctx->fd == NULL)
     {
@@ -305,9 +304,6 @@ int rtp_stream_process(void *ctx, const void *buffer, int len)
     fflush(rtp_ctx->fd);
     fclose(rtp_ctx->fd);
     rtp_ctx->fd = NULL;
-#endif
-
-    player_feed(&rtp_ctx->player, buffer, len);
 
     return 0;
 }

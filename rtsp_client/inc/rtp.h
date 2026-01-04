@@ -93,7 +93,6 @@ typedef struct
     char stream_filename[64];       // 码流文件名
     int last_frame_type;            // 上一帧类型
     int last_last_frame_type;       // 上上一帧类型
-    player_t player;                // 管道播放上下文
     size_t total_written;           // 已写入文件的总字节数
 
 } rtp_t;

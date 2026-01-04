@@ -16,7 +16,7 @@
 #define TO_STRING(x) STRINGIFY(x)
 
 // RTSP服务器配置（可根据实际情况修改）
-#define RTSP_SERVER_IP "192.168.0.103"     // RTSP服务器IP地址
+#define RTSP_SERVER_IP "192.168.0.107"     // RTSP服务器IP地址
 #define RTSP_SERVER_PORT 8554              // RTSP服务器端口
 #define RTSP_SERVER_URL "rtsp://" RTSP_SERVER_IP ":"                          \
                               TO_STRING(RTSP_SERVER_PORT) "/live"
