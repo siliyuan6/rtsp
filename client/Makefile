@@ -4,7 +4,7 @@
 # 检测操作系统
 ifeq ($(OS),Windows_NT)
     PLATFORM = WINDOWS
-    TARGET = rtsp_client.exe
+    TARGET = client.exe
     LDFLAGS = -lws2_32 -lpthread
     RM = del /Q
     RMDIR = rmdir /S /Q
@@ -13,7 +13,7 @@ ifeq ($(OS),Windows_NT)
     CFLAGS = -Wall -Wextra -std=c99 -O2 -Iinc -D_FORTIFY_SOURCE=0
 else
     PLATFORM = LINUX
-    TARGET = rtsp_client
+    TARGET = client
     LDFLAGS = -lpthread
     RM = rm -rf
     RM_CMD = $(RM) $(TARGET) obj
@@ -22,7 +22,7 @@ endif
 
 # 编译器设置
 # aarch64-linux-gnu-gcc
-CC = aarch64-linux-gnu-gcc
+CC = gcc
 
 # 目录设置
 SRC_DIR = src
@@ -30,7 +30,7 @@ OBJ_DIR = obj
 INC_DIR = inc
 
 # 源文件
-SOURCES = rtsp_client.c rtp.c player.c
+SOURCES = client.c rtp.c
 SRC_FILES = $(addprefix $(SRC_DIR)/, $(SOURCES))
 OBJECTS = $(addprefix $(OBJ_DIR)/, $(SOURCES:.c=.o))
 

@@ -10,7 +10,6 @@
 #define RTP_H
 
 #include <stdint.h>
-#include "player.h"
 
 typedef struct FU_INDICATOR_S
 {

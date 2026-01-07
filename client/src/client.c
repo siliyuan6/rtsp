@@ -20,7 +20,7 @@
 #define INVALID_SOCKET (-1)
 #endif
 
-#include "rtsp_client.h"
+#include "client.h"
 #include "rtp.h"
 #include "log.h"
 
@@ -73,9 +73,9 @@ int rtsp_get_session_id(const char *response, char *session_id)
  */
 int rtsp_request(rtsp_client_t *ctx)
 {
-    LOG("==========Request start==========\n");
+    LOG(">>>>>>>>>> request:\r\n");
     LOG("%s", ctx->rtsp_send_buf);
-    LOG("\n==========end==========\n");
+
     int ret = send(ctx->rtsp_fd, ctx->rtsp_send_buf
                 , strlen(ctx->rtsp_send_buf), 0);
     if (ret < 0)
@@ -103,9 +103,8 @@ int rtsp_receive(rtsp_client_t *ctx)
     if (recv_len > 0)
     {
         ctx->rtsp_recv_buf[recv_len] = '\0';
-        LOG("==========Response start==========\n");
+        LOG(">>>>>>>>>> response:\r\n");
         LOG("%s", ctx->rtsp_recv_buf);
-        LOG("==========end==========\n");
         return 0;
     }
     else

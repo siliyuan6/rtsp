@@ -1,5 +1,5 @@
 /**
- * @file rtsp_client.h
+ * @file client.h
  * @brief RTSP客户端头文件
  * 
  * 本文件定义了RTSP客户端的数据结构和常量，用于与RTSP服务器通信。
@@ -30,7 +30,7 @@
 #define RTSP_REQUEST_DESCRIBE                                                 \
         "DESCRIBE " RTSP_SERVER_URL " RTSP/1.0\r\n"                           \
         "CSeq: 2\r\n"                                                         \
-        "User-Agent: rtsp_client\r\n"                                         \
+        "User-Agent: client\r\n"                                         \
         "Accept: application/sdp\r\n"                                         \
         "\r\n"
 

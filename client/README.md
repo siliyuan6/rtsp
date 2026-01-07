@@ -14,15 +14,13 @@
 ## 目录结构
 
 ```
-rtsp_client/
+client/
 ├── README.md          # 本文件
 ├── Makefile           # 构建脚本
-├── rtsp_client.c      # RTSP客户端主程序
-├── rtsp_client.h      # RTSP客户端相关定义和数据结构
+├── client.c      # RTSP客户端主程序
+├── client.h      # RTSP客户端相关定义和数据结构
 ├── rtp.c              # RTP/RTCP协议实现
-├── rtp.h              # RTP相关定义和数据结构
-├── player.c           # 视频播放器接口实现
-└── player.h           # 播放器接口定义
+└── rtp.h              # RTP相关定义和数据结构
 ```
 
 ## 依赖要求
@@ -43,11 +41,11 @@ rtsp_client/
 ### Windows平台
 
 ```bash
-cd rtsp_client
+cd client
 make
 ```
 
-编译成功后会在当前目录生成 `rtsp_client.exe` 可执行文件。
+编译成功后会在当前目录生成 `client.exe` 可执行文件。
 
 ### 清理构建产物
 
@@ -59,7 +57,7 @@ make clean
 
 ### 修改RTSP服务器地址
 
-编辑 `rtsp_client.h` 文件，修改以下宏定义：
+编辑 `client.h` 文件，修改以下宏定义：
 
 ```c
 #define RTSP_SERVER_IP "192.168.0.103"    // 修改为实际的RTSP服务器IP
@@ -83,7 +81,7 @@ make clean
 ### 2. 运行客户端
 
 ```bash
-./rtsp_client.exe
+./client.exe
 ```
 
 ### 3. 查看输出
@@ -114,9 +112,8 @@ make clean
 
 ### 模块划分
 
-- **rtsp_client.c**: RTSP协议层，处理RTSP请求/响应
+- **client.c**: RTSP协议层，处理RTSP请求/响应
 - **rtp.c**: RTP协议层，处理RTP/RTCP数据包解析
-- **player.c**: 播放器接口，管理外部播放器进程
 
 ### 关键数据结构
 
@@ -130,7 +127,7 @@ make clean
 
 **A**: Windows平台需要安装pthread库。如果使用MinGW，通常已包含。也可以尝试：
 ```bash
-gcc -o rtsp_client rtsp_client.c rtp.c player.c -lws2_32 -lpthread
+gcc -o client client.c rtp.c -lws2_32 -lpthread
 ```
 
 ### Q: 运行时提示找不到ffplay
