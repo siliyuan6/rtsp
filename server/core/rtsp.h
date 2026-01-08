@@ -54,18 +54,20 @@ int RTSPHandleSetup(int clientFd, const char *request,
  * 
  * @param clientFd 客户端socket文件描述符
  * @param request 请求内容
+ * @param handle RTSP句柄指针
  * @return 成功返回0，失败返回-1
  */
-int RTSPHandlePlay(int clientFd, const char *request);
+int RTSPHandlePlay(int clientFd, const char *request, RTSPHandle_t *handle);
 
 /**
  * @brief 处理TEARDOWN请求
  * 
  * @param clientFd 客户端socket文件描述符
  * @param request 请求内容
+ * @param handle RTSP句柄指针
  * @return 成功返回0，失败返回-1
  */
-int RTSPHandleTeardown(int clientFd, const char *request);
+int RTSPHandleTeardown(int clientFd, const char *request, RTSPHandle_t *handle);
 
 /**
  * @brief 生成SDP描述

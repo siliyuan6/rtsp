@@ -56,6 +56,7 @@ int RTSPCreate(RTSPHandle_t **handle, const RTSPConfig_t *config,
 	h->rtspFd = -1;
 	h->rtpFd = -1;
 	h->rtcpFd = -1;
+	h->sessionId = 0; // 初始化为0，在SETUP时生成
 
 	// 初始化互斥锁
 	ret = pthread_mutex_init(&h->mutex, NULL);

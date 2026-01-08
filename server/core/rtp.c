@@ -599,7 +599,7 @@ void *RTPHandleThread(void *args)
 				}
 				
 				// 发送RTP数据
-				ret = RTPSendData(handle->rtpFd, &handle->clientAddr,
+				ret = RTPSendData(handle->rtpFd, &handle->clientRtpAddr,
 					handle->config.format, 
 					dataBuf, dataLen, 
 					&seq, &timestamp);
