@@ -15,9 +15,9 @@
 #include <arpa/inet.h>
 
 #include "rtsp_api.h"
-#include "../network/network.h"
-#include "../core/rtsp.h"
-#include "../../common/log.h"
+#include "network/network.h"
+#include "core/rtsp.h"
+#include "common/log.h"
 
 /**
  * @brief 创建RTSP模块句柄
@@ -83,7 +83,7 @@ int RTSPCreate(RTSPHandle_t **handle, const RTSPConfig_t *config,
 	ret = pthread_create(&h->rtspThread, NULL, RTSPHandleThread, h);
 	if (ret != 0)
 	{
-		LOG_ERR("pthread_create RTSP thread failed\n");
+		LOG_ERR("pthread_create RTSP thread failed, ret=%d\n", ret);
 		close(h->rtspFd);
 		pthread_mutex_destroy(&h->mutex);
 		free(h);
@@ -91,8 +91,8 @@ int RTSPCreate(RTSPHandle_t **handle, const RTSPConfig_t *config,
 		return -1;
 	}
 
-	LOG_INFO("RTSP server created, listening on port %d\n",
-		config->rtspPort);
+	LOG_INFO("RTSP server created, listening on port %d, RTSP thread created (tid=%lu)\n",
+		config->rtspPort, (unsigned long)h->rtspThread);
 
 	*handle = h;
 	return 0;

@@ -14,13 +14,15 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/select.h>
+#include <sys/prctl.h>
+#include <errno.h>
 #include <time.h>
 
 #include "rtsp.h"
-#include "../api/rtsp_api.h"
-#include "../network/network.h"
-#include "../core/rtp.h"
-#include "../../common/log.h"
+#include "rtp.h"
+#include "api/rtsp_api.h"
+#include "network/network.h"
+#include "common/log.h"
 
 #define RTSP_BUFFER_SIZE 4096
 #define RTSP_VERSION "RTSP/1.0"
@@ -550,19 +552,34 @@ static int ParseRTSPRequest(const char *request, char *method, char *url)
 void *RTSPHandleThread(void *args)
 {
 	RTSPHandle_t *handle = (RTSPHandle_t*)args;
+	int ret = 0;
 	int clientFd = -1;
 	char requestBuf[RTSP_BUFFER_SIZE];
 	int recvLen = 0;
 	char method[32];
 	char url[256];
-
+	
+	// 在线程函数最开始就设置线程名称，确保htop能正确显示
+	// 必须在任何其他操作之前设置，包括检查handle
+	ret = prctl(PR_SET_NAME, "RTSPHandle", 0, 0, 0);
+	if (ret != 0)
+	{
+		LOG_WARN("Failed to set RTSPHandle thread name, errno=%d\n", errno);
+	}
+	else
+	{
+		LOG_INFO("RTSPHandle thread name set successfully (tid=%lu)\n", 
+			(unsigned long)pthread_self());
+	}
+	
 	if (NULL == handle)
 	{
 		LOG_ERR("Invalid handle\n");
 		return (void*)-1;
 	}
 
-	LOG_INFO("RTSP thread started, listening on port %d\n", handle->config.rtspPort);
+	LOG_INFO("RTSP thread started, listening on port %d, isRunning=%d\n", 
+		handle->config.rtspPort, handle->isRunning);
 
 	// 外层循环：不断接受新的客户端连接
 	while (handle->isRunning)

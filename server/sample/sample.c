@@ -14,10 +14,18 @@
 #include <pthread.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/prctl.h>
 #include <arpa/inet.h>
-#include "../api/rtsp_api.h"
-#include "../../common/log.h"
-#include "../../common/ringbuf/ringbuf.h"
+#include <ifaddrs.h>
+#include <net/if.h>
+#include "api/rtsp_api.h"
+#include "common/log.h"
+#include "common/ringbuf/ringbuf.h"
+
+/* 通过宏定义指定网卡名称，例如 wlan0, eth0 等 */
+#ifndef NETWORK_INTERFACE
+#define NETWORK_INTERFACE "wlan0"
+#endif
 
 static RTSPHandle_t *g_handle = NULL;
 static RingBuffer_t *g_ringbuf = NULL;
@@ -80,7 +88,7 @@ static int RingBufferPushOverwrite(RingBuffer_t *rb, const void *data, size_t si
 		int ret = 0;
 		int discard_count = 0;
 		
-		LOG_INFO("[RingBuf] Space insufficient, need %zu bytes, free %zu bytes, discarding old frames...\n",
+		LOG_DEBUG("[RingBuf] Space insufficient, need %zu bytes, free %zu bytes, discarding old frames...\n",
 			size, free_size);
 		
 		// 循环丢弃帧，直到有足够空间或没有数据可丢弃
@@ -110,7 +118,7 @@ static int RingBufferPushOverwrite(RingBuffer_t *rb, const void *data, size_t si
 			if (ret == 0 && actualSize == frame_size)
 			{
 				discard_count++;
-				LOG_INFO("[RingBuf] Discarded old frame #%d: %u bytes\n", discard_count, frame_size);
+				LOG_DEBUG("[RingBuf] Discarded old frame #%d: %u bytes\n", discard_count, frame_size);
 			}
 			else
 			{
@@ -123,7 +131,7 @@ static int RingBufferPushOverwrite(RingBuffer_t *rb, const void *data, size_t si
 			free_size = RingBufferGetFree(rb);
 		}
 		
-		LOG_INFO("[RingBuf] Discarded %d frames, free space now: %zu bytes\n", discard_count, free_size);
+		LOG_DEBUG("[RingBuf] Discarded %d frames, free space now: %zu bytes\n", discard_count, free_size);
 	}
 	
 	// 推送新数据（现在应该有足够空间了，如果没有，RingBufferPush会阻塞等待）
@@ -179,12 +187,16 @@ static int FindStartCode(const unsigned char *data, int size, int offset, int *s
 static void* StreamReadThread(void *arg)
 {
 	(void) arg;
+	int ret = prctl(PR_SET_NAME, "StreamRead", 0, 0, 0);
+	if (ret != 0)
+	{
+		LOG_WARN("Failed to set StreamRead thread name\n");
+	}
 	FILE *fp = NULL;
 	unsigned char *read_buf = NULL;
 	int read_buf_size = 1024 * 1024; // 1MB读取缓冲区
 	int frame_buf_size = 512 * 1024; // 512KB帧缓冲区
 	unsigned char *frame_buf = NULL;
-	int ret = 0;
 	int start_pos = 0;
 	int next_frame_start = 0;
 	int frame_size = 0;
@@ -254,7 +266,8 @@ static void* StreamReadThread(void *arg)
 				}
 			}
 			data_in_buf += read_size;
-			LOG_DEBUG("[StreamRead] Read %d bytes from file, total in buffer: %d\n", read_size, data_in_buf);
+			LOG_DEBUG("[StreamRead] Read %d bytes from file, total in buffer: %d\n", 
+				read_size, data_in_buf);
 		}
 
 		// 查找第一个起始码
@@ -305,7 +318,8 @@ static void* StreamReadThread(void *arg)
 				{
 					// 文件读取完毕，将剩余数据作为一帧
 					frame_size = data_in_buf - start_pos;
-					LOG_DEBUG("[StreamRead] File EOF, using remaining data as frame, size: %d\n", frame_size);
+					LOG_DEBUG("[StreamRead] File EOF, using remaining data as frame, size: %d\n", 
+						frame_size);
 				}
 				else
 				{
@@ -320,7 +334,8 @@ static void* StreamReadThread(void *arg)
 			// 找到下一个起始码，next_frame_start 已经是起始码的开始位置
 			// 计算当前帧的大小（包含起始码）
 			frame_size = next_frame_start - start_pos;
-			LOG_DEBUG("[StreamRead] Found next start code at %d, frame size: %d\n", next_frame_start, frame_size);
+			LOG_DEBUG("[StreamRead] Found next start code at %d, frame size: %d\n", 
+				next_frame_start, frame_size);
 		}
 
 		// 检查帧大小是否合理
@@ -589,6 +604,66 @@ static int GetDataCallback(unsigned char *buf, unsigned int bufSize)
 }
 
 /**
+ * @brief 获取指定网卡的IP地址
+ * 
+ * @param interface_name 网卡名称，例如 "wlan0", "eth0" 等
+ * @param ip_str 输出参数，存储IP地址字符串，至少需要 INET_ADDRSTRLEN 字节
+ * @return 成功返回0，失败返回-1
+ */
+static int GetInterfaceIP(const char *interface_name, char *ip_str)
+{
+	struct ifaddrs *ifaddr = NULL;
+	struct ifaddrs *ifa = NULL;
+	int found = 0;
+
+	if (NULL == interface_name || NULL == ip_str)
+	{
+		return -1;
+	}
+
+	// 获取所有网络接口信息
+	if (getifaddrs(&ifaddr) == -1)
+	{
+		LOG_ERR("getifaddrs failed\n");
+		return -1;
+	}
+
+	// 遍历所有网络接口
+	for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next)
+	{
+		if (ifa->ifa_addr == NULL)
+		{
+			continue;
+		}
+
+		// 检查是否是目标网卡且是IPv4地址
+		if (strcmp(ifa->ifa_name, interface_name) == 0 &&
+			ifa->ifa_addr->sa_family == AF_INET)
+		{
+			struct sockaddr_in *sin = (struct sockaddr_in *)ifa->ifa_addr;
+			
+			// 将IP地址转换为字符串
+			if (inet_ntop(AF_INET, &sin->sin_addr, ip_str, INET_ADDRSTRLEN) != NULL)
+			{
+				found = 1;
+				break;
+			}
+		}
+	}
+
+	// 释放资源
+	freeifaddrs(ifaddr);
+
+	if (!found)
+	{
+		LOG_WARN("Failed to find IP address for interface: %s\n", interface_name);
+		return -1;
+	}
+
+	return 0;
+}
+
+/**
  * @brief 主函数
  * 
  * @param argc 参数个数
@@ -652,8 +727,22 @@ int main(int argc, char *argv[])
 	}
 
 	LOG_INFO("RTSP server started successfully\n");
-	LOG_INFO("You can connect using: rtsp://localhost:%d/live\n",
-		config.rtspPort);
+	
+	// 获取指定网卡的IP地址
+	char server_ip[INET_ADDRSTRLEN] = "localhost";
+	if (GetInterfaceIP(NETWORK_INTERFACE, server_ip) == 0)
+	{
+		LOG_INFO("Network interface %s IP: %s\n", NETWORK_INTERFACE, server_ip);
+		LOG_WARN("You can connect using: rtsp://%s:%d/live\n",
+			server_ip, config.rtspPort);
+	}
+	else
+	{
+		LOG_WARN("Failed to get IP for interface %s, using localhost\n", 
+			NETWORK_INTERFACE);
+		LOG_WARN("You can connect using: rtsp://localhost:%d/live\n",
+			config.rtspPort);
+	}
 	LOG_INFO("Press Ctrl+C to stop\n");
 
 	// 主循环：定期检查状态

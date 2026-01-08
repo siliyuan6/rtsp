@@ -11,8 +11,9 @@ SRC_DIRS = api network core sample
 OBJ_DIR = obj
 COMMON_DIR = ../common
 
-# 包含路径
-INCLUDES = $(addprefix -I, $(SRC_DIRS)) -I$(COMMON_DIR)
+# 包含路径：添加当前目录（server）和项目根目录，支持绝对路径风格的包含
+# 例如：api/rtsp_api.h, common/log.h
+INCLUDES = -I. -I.. $(addprefix -I, $(SRC_DIRS)) -I$(COMMON_DIR)
 
 # 源文件（自动查找）
 API_SRCS = $(wildcard api/*.c)
@@ -42,9 +43,25 @@ TARGET = sample_rtsp
 STATIC_LIB = $(OBJ_DIR)/librtsp.a
 SHARED_LIB = $(OBJ_DIR)/librtsp.so
 
+# 编译输出控制：设置为 0 显示完整命令，设置为 1 显示简短信息
+QUIET ?= 1
+
+ifeq ($(QUIET),1)
+    Q = @
+    ECHO_CC = @echo "  CC      $<"
+    ECHO_AR = @echo "  AR      $@"
+    ECHO_LD = @echo "  LD      $@"
+else
+    Q =
+    ECHO_CC =
+    ECHO_AR =
+    ECHO_LD =
+endif
+
 .PHONY: all clean sample static shared libs
 
 all: $(OBJ_DIR) libs sample
+	cp $(TARGET) /mnt/nfs
 
 # 创建目录结构
 $(OBJ_DIR):
@@ -63,38 +80,47 @@ $(OBJ_DIR)/log:
 # 通用编译规则：从源文件编译到obj目录
 # 使用order-only依赖确保目录存在
 $(OBJ_DIR)/api/%.o: api/%.c | $(OBJ_DIR)/api
-	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+	$(ECHO_CC)
+	$(Q)$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 $(OBJ_DIR)/network/%.o: network/%.c | $(OBJ_DIR)/network
-	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+	$(ECHO_CC)
+	$(Q)$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 $(OBJ_DIR)/core/%.o: core/%.c | $(OBJ_DIR)/core
-	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+	$(ECHO_CC)
+	$(Q)$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 $(OBJ_DIR)/sample/%.o: sample/%.c | $(OBJ_DIR)/sample
-	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+	$(ECHO_CC)
+	$(Q)$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 # ringbuf 编译规则
 $(OBJ_DIR)/ringbuf/ringbuf.o: $(COMMON_DIR)/ringbuf/ringbuf.c | $(OBJ_DIR)/ringbuf
-	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+	$(ECHO_CC)
+	$(Q)$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 # log 编译规则
 $(OBJ_DIR)/log/log.o: $(COMMON_DIR)/log.c | $(OBJ_DIR)/log
-	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+	$(ECHO_CC)
+	$(Q)$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 # 链接示例程序
 sample: $(LIB_OBJS) $(SAMPLE_OBJS) $(RINGBUF_OBJS) $(LOG_OBJS)
-	$(CC) $(LIB_OBJS) $(SAMPLE_OBJS) $(RINGBUF_OBJS) $(LOG_OBJS) -o $(TARGET) $(LDFLAGS)
+	$(ECHO_LD)
+	$(Q)$(CC) $(LIB_OBJS) $(SAMPLE_OBJS) $(RINGBUF_OBJS) $(LOG_OBJS) -o $(TARGET) $(LDFLAGS)
 	@echo "Build completed: $(TARGET)"
 
 # 编译静态库
 static: $(LIB_OBJS)
+	$(ECHO_AR)
 	$(AR) $(ARFLAGS) $(STATIC_LIB) $(LIB_OBJS)
 	@echo "Static library built: $(STATIC_LIB)"
 
 # 编译动态库
 shared: $(LIB_OBJS)
-	$(CC) -shared -o $(SHARED_LIB) $(LIB_OBJS) $(LDFLAGS)
+	$(ECHO_LD)
+	$(Q)$(CC) -shared -o $(SHARED_LIB) $(LIB_OBJS) $(LDFLAGS)
 	@echo "Shared library built: $(SHARED_LIB)"
 
 # 编译所有库

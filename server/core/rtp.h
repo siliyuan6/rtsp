@@ -8,7 +8,7 @@
 #ifndef RTP_H
 #define RTP_H
 
-#include "../api/rtsp_api.h"
+#include "api/rtsp_api.h"
 
 #define RTP_VERSION 2
 #define RTP_HEADER_SIZE 12

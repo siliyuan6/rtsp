@@ -8,7 +8,7 @@
 #ifndef RTSP_H
 #define RTSP_H
 
-#include "../api/rtsp_api.h"
+#include "api/rtsp_api.h"
 
 /**
  * @brief RTSP处理线程

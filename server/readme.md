@@ -65,7 +65,15 @@ make clean
 
 ## 使用方法
 
-### 基本使用
+## sample执行
+``` bash
+# 正常启动
+./sample_rtsp 704x576.h264
+# 开启调试打印启动
+./sample_rtsp 704x576.h264 debug
+```
+
+### 接口基本使用
 
 1. 创建RTSP配置：
 ```c

@@ -13,12 +13,13 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sys/prctl.h>
 #include <time.h>
 #define closesocket close
 
 #include "rtp.h"
-#include "../api/rtsp_api.h"
-#include "../../common/log.h"
+#include "api/rtsp_api.h"
+#include "common/log.h"
 
 #define FU_A_START 0x80
 #define FU_A_MID 0x00
@@ -541,18 +542,25 @@ static int GetNALUType(const unsigned char *data, int len)
 void *RTPHandleThread(void *args)
 {
 	RTSPHandle_t *handle = (RTSPHandle_t*)args;
+	int ret = 0;
 	unsigned char *dataBuf = NULL;
 	int dataLen = 0;
 	unsigned short seq = 0;
 	unsigned int timestamp = 0;
 	int timestampIncrement = 0;
-	int ret = 0;
 	int naluType = 0;
 
 	if (NULL == handle)
 	{
 		LOG_ERR("Invalid handle\n");
 		return (void*)-1;
+	}
+
+	// 设置线程名称
+	ret = prctl(PR_SET_NAME, "RTPHandle", 0, 0, 0);
+	if (ret != 0)
+	{
+		LOG_WARN("Failed to set RTPHandle thread name\n");
 	}
 
 	// 分配数据缓冲区

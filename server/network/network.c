@@ -17,7 +17,7 @@
 #define INVALID_SOCKET (-1)
 
 #include "network.h"
-#include "../../common/log.h"
+#include "common/log.h"
 
 /**
  * @brief 创建RTSP TCP监听socket
