@@ -80,7 +80,7 @@ int CreateRtspSocket(int port)
 		return -1;
 	}
 
-	LOG("RTSP socket created, listening on port %d\n", port);
+	LOG_INFO("RTSP socket created, listening on port %d\n", port);
 	return sock;
 }
 
@@ -165,7 +165,7 @@ int CreateRtpSocket(int port, int *rtpPortOut, int *rtcpPortOut)
 	if (rtpSock < 0)
 	{
 		// 如果指定端口不可用，自动查找可用端口
-		LOG("Port %d not available, searching for available port\n",
+		LOG_INFO("Port %d not available, searching for available port\n",
 			rtpPort);
 		for (rtpPort = 5000; rtpPort < 65535; rtpPort += 2)
 		{
@@ -198,7 +198,7 @@ int CreateRtpSocket(int port, int *rtpPortOut, int *rtcpPortOut)
 	*rtpPortOut = rtpPort;
 	*rtcpPortOut = rtcpPort;
 
-	LOG("RTP socket created, RTP port: %d, RTCP port: %d\n",
+	LOG_INFO("RTP socket created, RTP port: %d, RTCP port: %d\n",
 		rtpPort, rtcpPort);
 
 	return rtpSock;

@@ -35,7 +35,7 @@ static void SignalHandler(int sig)
 {
 	if (sig == SIGINT || sig == SIGTERM)
 	{
-		LOG("Received signal %d, shutting down...\n", sig);
+		LOG_INFO("Received signal %d, shutting down...\n", sig);
 		g_thread_running = 0;
 		if (NULL != g_ringbuf)
 		{
@@ -48,6 +48,86 @@ static void SignalHandler(int sig)
 		}
 		exit(0);
 	}
+}
+
+/**
+ * @brief 覆盖写模式推送数据到ringbuf
+ * 
+ * 如果ringbuf空间不足，会丢弃最旧的一帧数据，然后再推送新数据
+ * 
+ * @param rb ringbuf指针
+ * @param data 要推送的数据
+ * @param size 数据大小
+ * @return 成功返回0，失败返回-1
+ */
+static int RingBufferPushOverwrite(RingBuffer_t *rb, const void *data, size_t size)
+{
+	if (NULL == rb || NULL == data || size == 0)
+	{
+		return -1;
+	}
+
+	// 检查是否有足够空间
+	size_t free_size = RingBufferGetFree(rb);
+	
+	// 如果空间不足，丢弃最旧的数据直到有足够空间
+	if (free_size < size)
+	{
+		unsigned int frame_size_net = 0;
+		unsigned int frame_size = 0;
+		size_t actualSize = 0;
+		unsigned char discard_buf[512 * 1024]; // 512KB丢弃缓冲区
+		int ret = 0;
+		int discard_count = 0;
+		
+		LOG_INFO("[RingBuf] Space insufficient, need %zu bytes, free %zu bytes, discarding old frames...\n",
+			size, free_size);
+		
+		// 循环丢弃帧，直到有足够空间或没有数据可丢弃
+		while (free_size < size)
+		{
+			// 尝试读取并丢弃一帧（非阻塞模式）
+			ret = RingBufferPop(rb, &frame_size_net, sizeof(frame_size_net), 
+				&actualSize, 0);
+			if (ret != 0 || actualSize != sizeof(frame_size_net))
+			{
+				// 没有更多数据可丢弃
+				LOG_ERR("[RingBuf] No more data to discard, need %zu bytes, free %zu bytes\n",
+					size, free_size);
+				// 如果仍然空间不足，尝试强制推送（可能会阻塞，但至少不会死锁）
+				break;
+			}
+			
+			frame_size = ntohl(frame_size_net);
+			if (frame_size == 0 || frame_size > sizeof(discard_buf))
+			{
+				LOG_ERR("[RingBuf] Invalid frame size to discard: %u\n", frame_size);
+				break;
+			}
+			
+			// 丢弃帧数据
+			ret = RingBufferPop(rb, discard_buf, frame_size, &actualSize, 0);
+			if (ret == 0 && actualSize == frame_size)
+			{
+				discard_count++;
+				LOG_INFO("[RingBuf] Discarded old frame #%d: %u bytes\n", discard_count, frame_size);
+			}
+			else
+			{
+				LOG_ERR("[RingBuf] Failed to discard frame data, ret=%d, actualSize=%zu\n",
+					ret, actualSize);
+				break;
+			}
+			
+			// 重新检查空间
+			free_size = RingBufferGetFree(rb);
+		}
+		
+		LOG_INFO("[RingBuf] Discarded %d frames, free space now: %zu bytes\n", discard_count, free_size);
+	}
+	
+	// 推送新数据（现在应该有足够空间了，如果没有，RingBufferPush会阻塞等待）
+	return RingBufferPush(rb, data, size);
 }
 
 /**
@@ -142,7 +222,7 @@ static void* StreamReadThread(void *arg)
 		return NULL;
 	}
 
-	LOG("Stream read thread started, reading from: %s\n", g_stream_file);
+	LOG_INFO("Stream read thread started, reading from: %s\n", g_stream_file);
 
 	// 读取文件数据到缓冲区
 	int data_in_buf = 0;
@@ -157,13 +237,24 @@ static void* StreamReadThread(void *arg)
 			if (read_size <= 0)
 			{
 				// 文件读取完毕，重新开始（循环播放）
-				fseek(fp, 0, SEEK_SET);
-				data_in_buf = 0;
-				start_pos = 0;
-				LOG("Stream file read completed, restarting...\n");
-				continue;
+				if (feof(fp))
+				{
+					LOG_DEBUG("[StreamRead] File EOF reached, restarting from beginning...\n");
+					fseek(fp, 0, SEEK_SET);
+					clearerr(fp);
+					data_in_buf = 0;
+					start_pos = 0;
+					continue;
+				}
+				else
+				{
+					// 读取错误
+					LOG_ERR("[StreamRead] File read error: %d\n", ferror(fp));
+					break;
+				}
 			}
 			data_in_buf += read_size;
+			LOG_DEBUG("[StreamRead] Read %d bytes from file, total in buffer: %d\n", read_size, data_in_buf);
 		}
 
 		// 查找第一个起始码
@@ -174,12 +265,14 @@ static void* StreamReadThread(void *arg)
 			if (start_pos < 0)
 			{
 				// 未找到起始码，清空缓冲区，继续读取
+				LOG_DEBUG("[StreamRead] No start code found, clearing buffer\n");
 				data_in_buf = 0;
 				start_pos = 0;
 				usleep(10000); // 等待10ms
 				continue;
 			}
 			// start_pos 已经是起始码的开始位置，可以直接使用
+			LOG_DEBUG("[StreamRead] Found start code at position %d\n", start_pos);
 		}
 
 		// 查找下一个起始码（确定帧边界）
@@ -194,12 +287,32 @@ static void* StreamReadThread(void *arg)
 			{
 				// 缓冲区快满了，将剩余数据作为一帧
 				frame_size = data_in_buf - start_pos;
+				LOG_DEBUG("[StreamRead] Buffer full, using remaining data as frame, size: %d\n", frame_size);
 			}
 			else
 			{
-				// 继续读取
-				usleep(10000);
-				continue;
+				// 继续读取更多数据
+				LOG_DEBUG("[StreamRead] No next start code found, reading more data from file...\n");
+				int read_size = fread(read_buf + data_in_buf, 1, 
+					read_buf_size - data_in_buf, fp);
+				if (read_size > 0)
+				{
+					data_in_buf += read_size;
+					LOG_DEBUG("[StreamRead] Read %d more bytes, total in buffer: %d\n", read_size, data_in_buf);
+					continue; // 重新查找下一个起始码
+				}
+				else if (feof(fp))
+				{
+					// 文件读取完毕，将剩余数据作为一帧
+					frame_size = data_in_buf - start_pos;
+					LOG_DEBUG("[StreamRead] File EOF, using remaining data as frame, size: %d\n", frame_size);
+				}
+				else
+				{
+					// 读取错误
+					LOG_ERR("[StreamRead] File read error: %d\n", ferror(fp));
+					break;
+				}
 			}
 		}
 		else
@@ -207,6 +320,7 @@ static void* StreamReadThread(void *arg)
 			// 找到下一个起始码，next_frame_start 已经是起始码的开始位置
 			// 计算当前帧的大小（包含起始码）
 			frame_size = next_frame_start - start_pos;
+			LOG_DEBUG("[StreamRead] Found next start code at %d, frame size: %d\n", next_frame_start, frame_size);
 		}
 
 		// 检查帧大小是否合理
@@ -221,23 +335,33 @@ static void* StreamReadThread(void *arg)
 		// 复制帧数据到帧缓冲区
 		memcpy(frame_buf, read_buf + start_pos, frame_size);
 
-		// 推送到循环队列（先推送长度字段，再推送数据）
-		// LOG("Push frame to ring buffer, size: %d\n", frame_size);
+		// 推送到循环队列（先推送长度字段，再推送数据，支持覆盖写）
+		LOG_DEBUG("[StreamRead] Pushing frame to ringbuf, size: %d bytes\n", frame_size);
 		// 先推送4字节的长度字段（网络字节序）
 		unsigned int frame_size_net = htonl((unsigned int)frame_size);
-		ret = RingBufferPush(g_ringbuf, &frame_size_net, sizeof(frame_size_net));
+		ret = RingBufferPushOverwrite(g_ringbuf, &frame_size_net, sizeof(frame_size_net));
 		if (ret < 0)
 		{
-			LOG_ERR("Failed to push frame size to ring buffer (closed?)\n");
+			LOG_ERR("[StreamRead] Failed to push frame size to ring buffer (closed?)\n");
 			break;
 		}
+		LOG_DEBUG("[StreamRead] Frame size pushed, now pushing frame data...\n");
 		// 再推送帧数据
-		ret = RingBufferPush(g_ringbuf, frame_buf, frame_size);
+		ret = RingBufferPushOverwrite(g_ringbuf, frame_buf, frame_size);
 		if (ret < 0)
 		{
-			LOG_ERR("Failed to push frame data to ring buffer (closed?)\n");
+			LOG_ERR("[StreamRead] Failed to push frame data to ring buffer (closed?)\n");
 			break;
 		}
+		LOG_DEBUG("[StreamRead] Frame data pushed successfully\n");
+		
+		// 打印ringbuf数据信息
+		size_t data_size = RingBufferGetSize(g_ringbuf);
+		size_t free_size = RingBufferGetFree(g_ringbuf);
+		size_t capacity = data_size + free_size;
+		double usage = capacity > 0 ? (double)data_size * 100.0 / capacity : 0.0;
+		LOG_DEBUG("[RingBuf Push] Frame: %d bytes, DataSize: %zu bytes, FreeSize: %zu bytes, Usage: %.2f%%\n",
+			frame_size, data_size, free_size, usage);
 
 		// 更新缓冲区状态
 		if (next_frame_start > 0)
@@ -260,8 +384,12 @@ static void* StreamReadThread(void *arg)
 		}
 
 		// 控制读取速度（根据FPS，这里假设25fps）
+		LOG_DEBUG("[StreamRead] Frame processed, sleeping 40ms...\n");
 		usleep(40000); // 40ms = 25fps
+		LOG_DEBUG("[StreamRead] Woke up, continuing loop...\n");
 	}
+	
+	LOG_DEBUG("[StreamRead] Thread exiting, g_thread_running=%d\n", g_thread_running);
 
 	// 清理资源
 	if (read_buf != NULL)
@@ -277,7 +405,7 @@ static void* StreamReadThread(void *arg)
 		fclose(fp);
 	}
 
-	LOG("Stream read thread exited\n");
+	LOG_INFO("Stream read thread exited\n");
 	return NULL;
 }
 
@@ -322,7 +450,7 @@ static int InitStreamReader(const char *stream_file, size_t ringbuf_size)
 		return -1;
 	}
 
-	LOG("Ring buffer created, size: %zu bytes\n", ringbuf_size);
+	LOG_INFO("Ring buffer created, size: %zu bytes\n", ringbuf_size);
 
 	// 启动读取线程
 	g_thread_running = 1;
@@ -338,7 +466,7 @@ static int InitStreamReader(const char *stream_file, size_t ringbuf_size)
 		return -1;
 	}
 
-	LOG("Stream reader initialized successfully\n");
+	LOG_INFO("Stream reader initialized successfully\n");
 	return 0;
 }
 
@@ -376,7 +504,7 @@ static void CleanupStreamReader(void)
 		g_stream_file = NULL;
 	}
 
-	LOG("Stream reader cleaned up\n");
+	LOG_INFO("Stream reader cleaned up\n");
 }
 
 /**
@@ -448,6 +576,14 @@ static int GetDataCallback(unsigned char *buf, unsigned int bufSize)
 		return (ret == 1) ? 0 : -1;
 	}
 	
+	// 打印ringbuf数据信息
+	size_t data_size = RingBufferGetSize(g_ringbuf);
+	size_t free_size = RingBufferGetFree(g_ringbuf);
+	size_t capacity = data_size + free_size;
+	double usage = capacity > 0 ? (double)data_size * 100.0 / capacity : 0.0;
+	LOG_DEBUG("[RingBuf Pop] Frame: %u bytes, DataSize: %zu bytes, FreeSize: %zu bytes, Usage: %.2f%%\n",
+		frame_size, data_size, free_size, usage);
+	
 	// 返回完整帧长度
 	return (int)frame_size;
 }
@@ -469,10 +605,17 @@ int main(int argc, char *argv[])
 	// 解析命令行参数
 	if (argc < 2)
 	{
-		LOG_ERR("Usage: %s <stream_file>\n", argv[0]);
+		LOG_ERR("Usage: %s <stream_file> [debug]\n", argv[0]);
 		return -1;
 	}
 	stream_file = argv[1];
+
+	// 检查是否有debug参数
+	if (argc >= 3 && strcmp(argv[2], "debug") == 0)
+	{
+		SetLogDebugEnabled(1);
+		LOG_INFO("Debug logging enabled\n");
+	}
 
 	// 注册信号处理
 	signal(SIGINT, SignalHandler);
@@ -493,11 +636,11 @@ int main(int argc, char *argv[])
 	config.format = RTSP_FORMAT_H264; // H.264格式
 	config.fps = 25; // 25帧/秒
 
-	LOG("RTSP Server Sample\n");
-	LOG("RTSP Port: %d\n", config.rtspPort);
-	LOG("RTP Port: %d\n", config.rtpPort);
-	LOG("Format: H.264\n");
-	LOG("FPS: %d\n", config.fps);
+	LOG_INFO("RTSP Server Sample\n");
+	LOG_INFO("RTSP Port: %d\n", config.rtspPort);
+	LOG_INFO("RTP Port: %d\n", config.rtpPort);
+	LOG_INFO("Format: H.264\n");
+	LOG_INFO("FPS: %d\n", config.fps);
 
 	// 创建RTSP服务器
 	ret = RTSPCreate(&g_handle, &config, GetDataCallback);
@@ -508,10 +651,10 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
-	LOG("RTSP server started successfully\n");
-	LOG("You can connect using: rtsp://localhost:%d/live\n",
+	LOG_INFO("RTSP server started successfully\n");
+	LOG_INFO("You can connect using: rtsp://localhost:%d/live\n",
 		config.rtspPort);
-	LOG("Press Ctrl+C to stop\n");
+	LOG_INFO("Press Ctrl+C to stop\n");
 
 	// 主循环：定期检查状态
 	while (1)
@@ -526,7 +669,7 @@ int main(int argc, char *argv[])
 			{
 				if (status == RTSP_STATUS_STOPPED)
 				{
-					LOG("RTSP server stopped\n");
+					LOG_INFO("RTSP server stopped\n");
 					break;
 				}
 			}
@@ -547,7 +690,7 @@ int main(int argc, char *argv[])
 	// 清理码流读取功能
 	CleanupStreamReader();
 
-	LOG("RTSP server sample exited\n");
+	LOG_INFO("RTSP server sample exited\n");
 	return 0;
 }
 

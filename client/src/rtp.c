@@ -159,7 +159,7 @@ int rtp_create(void **ctx)
         rtp_ctx->rtp_fd[1] = rtp_fd1;
         rtp_ctx->rtp_listen_port[0] = port;
         rtp_ctx->rtp_listen_port[1] = port + 1;
-        LOG("bind port to %d and %d. \n", port, port + 1);
+        LOG_INFO("bind port to %d and %d. \n", port, port + 1);
         break;
     }
 
@@ -183,9 +183,9 @@ int rtp_create(void **ctx)
 
     // 初始化时删除旧文件，重新开始记录
     remove(rtp_ctx->stream_filename);
-    LOG("Stream file will be saved to: %s\n", rtp_ctx->stream_filename);
+    LOG_INFO("Stream file will be saved to: %s\n", rtp_ctx->stream_filename);
 
-    LOG("RTP create success.\n");
+    LOG_INFO("RTP create success.\n");
 
     *ctx = rtp_ctx;
 
@@ -221,7 +221,7 @@ int rtp_destroy(void *ctx)
     
     if (rtp_ctx->total_written > 0)
     {
-        LOG("Total %zu bytes written to %s\n", rtp_ctx->total_written, rtp_ctx->stream_filename);
+        LOG_INFO("Total %zu bytes written to %s\n", rtp_ctx->total_written, rtp_ctx->stream_filename);
     }
     else
     {
@@ -240,7 +240,7 @@ int rtp_destroy(void *ctx)
         free(ctx);
     }
 
-    LOG("RTP destroy success.\n");
+    LOG_INFO("RTP destroy success.\n");
 
     return 0;
 }
@@ -255,12 +255,12 @@ void rtp_print_memory(const void *addr, size_t size)
         // 每16个字节换行
         if (i % 16 == 0 && i != 0)
         {
-            LOG("\n");
+            LOG_INFO("\n");
         }
         // 打印每个字节的16进制
-        LOG("%02x ", p[i]);
+        LOG_INFO("%02x ", p[i]);
     }
-    LOG("\n");
+    LOG_INFO("\n");
 }
 #endif
 
@@ -278,10 +278,10 @@ int rtp_stream_process(void *ctx, const void *buffer, int len)
     rtp_t *rtp_ctx = (rtp_t *)ctx;
 
 #ifdef RTP_DEBUG_ENABLE
-    LOG("==========start==========\n");
-    LOG("rtp_stream_process. len:%d.\n", len);
+    LOG_INFO("==========start==========\n");
+    LOG_INFO("rtp_stream_process. len:%d.\n", len);
     rtp_print_memory(buffer, len);
-    LOG("==========done==========\n");
+    LOG_INFO("==========done==========\n");
 #endif
 
     rtp_ctx->fd = fopen(rtp_ctx->stream_filename, "ab");

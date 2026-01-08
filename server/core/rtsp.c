@@ -69,7 +69,7 @@ static int SendRTSPResponse(int clientFd, int statusCode,
 		len += snprintf(response + len, sizeof(response) - len, "\r\n");
 	}
 
-	LOG(">>>>>>>>>>> Send RTSP response: %s\n", response);
+	LOG_INFO(">>>>>>>>>>> Send RTSP response: %s\n", response);
 	// 发送响应
 	int sent = send(clientFd, response, len, 0);
 	if (sent != len)
@@ -562,7 +562,7 @@ void *RTSPHandleThread(void *args)
 		return (void*)-1;
 	}
 
-	LOG("RTSP thread started, listening on port %d\n", handle->config.rtspPort);
+	LOG_INFO("RTSP thread started, listening on port %d\n", handle->config.rtspPort);
 
 	// 外层循环：不断接受新的客户端连接
 	while (handle->isRunning)
@@ -608,7 +608,7 @@ void *RTSPHandleThread(void *args)
 	}
 
 	handle->clientAddr = clientAddr;
-	LOG("Client connected from %s:%d\n", inet_ntoa(clientAddr.sin_addr), 
+	LOG_INFO("Client connected from %s:%d\n", inet_ntoa(clientAddr.sin_addr), 
 		ntohs(clientAddr.sin_port));
 
 		// 内层循环：处理当前客户端的RTSP请求
@@ -624,7 +624,7 @@ void *RTSPHandleThread(void *args)
 			}
 				else
 				{
-					LOG("Client disconnected\n");
+					LOG_INFO("Client disconnected\n");
 				}
 				// 客户端断开，关闭连接并跳出内层循环，等待新连接
 				close(clientFd);
@@ -633,7 +633,7 @@ void *RTSPHandleThread(void *args)
 		}
 
 		requestBuf[recvLen] = '\0';
-		LOG(">>>>>>>>>>> Received RTSP request:\n%s\n", requestBuf);
+		LOG_INFO(">>>>>>>>>>> Received RTSP request:\n%s\n", requestBuf);
 
 		// 解析请求
 		if (ParseRTSPRequest(requestBuf, method, url) < 0)
@@ -671,7 +671,7 @@ void *RTSPHandleThread(void *args)
 					}
 					else
 					{
-						LOG("RTP thread created\n");
+						LOG_INFO("RTP thread created\n");
 					}
 				}
 				else
@@ -710,7 +710,7 @@ void *RTSPHandleThread(void *args)
 		close(clientFd);
 	}
 
-	LOG("RTSP thread exited\n");
+	LOG_INFO("RTSP thread exited\n");
 	return (void*)0;
 }
 

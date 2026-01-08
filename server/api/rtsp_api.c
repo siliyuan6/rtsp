@@ -91,7 +91,7 @@ int RTSPCreate(RTSPHandle_t **handle, const RTSPConfig_t *config,
 		return -1;
 	}
 
-	LOG("RTSP server created, listening on port %d\n",
+	LOG_INFO("RTSP server created, listening on port %d\n",
 		config->rtspPort);
 
 	*handle = h;
@@ -155,7 +155,7 @@ int RTSPDestroy(RTSPHandle_t *handle)
 	free(handle);
 	handle = NULL;
 
-	LOG("RTSP server destroyed\n");
+	LOG_INFO("RTSP server destroyed\n");
 	return 0;
 }
 

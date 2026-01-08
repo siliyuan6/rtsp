@@ -73,8 +73,8 @@ int rtsp_get_session_id(const char *response, char *session_id)
  */
 int rtsp_request(rtsp_client_t *ctx)
 {
-    LOG(">>>>>>>>>> request:\r\n");
-    LOG("%s", ctx->rtsp_send_buf);
+    LOG_INFO(">>>>>>>>>> request:\r\n");
+    LOG_INFO("%s", ctx->rtsp_send_buf);
 
     int ret = send(ctx->rtsp_fd, ctx->rtsp_send_buf
                 , strlen(ctx->rtsp_send_buf), 0);
@@ -103,8 +103,8 @@ int rtsp_receive(rtsp_client_t *ctx)
     if (recv_len > 0)
     {
         ctx->rtsp_recv_buf[recv_len] = '\0';
-        LOG(">>>>>>>>>> response:\r\n");
-        LOG("%s", ctx->rtsp_recv_buf);
+        LOG_INFO(">>>>>>>>>> response:\r\n");
+        LOG_INFO("%s", ctx->rtsp_recv_buf);
         return 0;
     }
     else
@@ -190,7 +190,7 @@ int rtsp_create(void **ctx)
         return -1;
     }
 
-    LOG("RTSP create success. rtsp_fd:%d. \n", rtsp_ctx->rtsp_fd);
+    LOG_INFO("RTSP create success. rtsp_fd:%d. \n", rtsp_ctx->rtsp_fd);
 
     *ctx = rtsp_ctx;
 
@@ -224,7 +224,7 @@ int rtsp_destroy(void *ctx)
         free(rtsp_ctx);
     }
 
-    LOG("RTSP destroy success.\n");
+    LOG_INFO("RTSP destroy success.\n");
 
     return 0;
 }
@@ -254,7 +254,7 @@ void *rtsp_work(void *args)
         LOG_ERR("RTP create failed\n");
         return (void *)-1;
     }
-    LOG("RTP create success. rtp_fd[0]:%d, rtp_fd[1]:%d. \n"
+    LOG_INFO("RTP create success. rtp_fd[0]:%d, rtp_fd[1]:%d. \n"
         , ctx->rtp_ctx->rtp_fd[0]
         , ctx->rtp_ctx->rtp_fd[1]);
 
@@ -299,7 +299,7 @@ void *rtsp_work(void *args)
             , RTSP_REQUEST_SETUP_TRACK1
             , str_port0
             , str_port1);
-    LOG("Sending SETUP request (track0) with client_port=%s-%s\n", str_port0, str_port1);
+    LOG_INFO("Sending SETUP request (track0) with client_port=%s-%s\n", str_port0, str_port1);
     if (rtsp_request(ctx) < 0)
     {
         goto EXIT_FAIL;
@@ -324,7 +324,7 @@ void *rtsp_work(void *args)
         , str_port0
         , str_port1
         , ctx->session_id);
-    LOG("Sending SETUP request (track1) with client_port=%s-%s\n", str_port0, str_port1);
+    LOG_INFO("Sending SETUP request (track1) with client_port=%s-%s\n", str_port0, str_port1);
     if (rtsp_request(ctx) < 0)
     {
         goto EXIT_FAIL;
@@ -362,7 +362,7 @@ void *rtsp_work(void *args)
                 LOG_ERR("RTSP disconnect!\n");
                 goto EXIT_FAIL;
             }
-            LOG("RTSP keepalive\n");
+            LOG_INFO("RTSP keepalive\n");
             last_time = time(NULL);
         }
 
@@ -402,7 +402,7 @@ void *rtsp_work(void *args)
                 packet_count++;
                 if (packet_count <= 10 || packet_count % 100 == 0)
                 {
-                    LOG("Received RTP packet #%d, len=%d\n", packet_count, len);
+                    LOG_INFO("Received RTP packet #%d, len=%d\n", packet_count, len);
                 }
                 rtp_pkg_parse((void *)rtp_ctx, rtp_ctx->rtp_recv_buf, len);
             }

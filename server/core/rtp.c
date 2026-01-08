@@ -262,7 +262,6 @@ int RTPEncapsulate(RTSPStreamFormat_t format,
 			int naluDataSize = len - startCodeLen;
 
 			// 判断是否需要分片
-			// LOG("naluDataSize(no start code): %d \n", naluDataSize);
 			if (naluDataSize <= RTP_MAX_PAYLOAD_SIZE - RTP_HEADER_SIZE - 1)
 			{
 				// 单包
@@ -574,7 +573,7 @@ void *RTPHandleThread(void *args)
 		timestampIncrement = 3000; // 默认30fps
 	}
 
-	LOG("RTP thread started, timestamp increment: %d\n",
+	LOG_INFO("RTP thread started, timestamp increment: %d\n",
 		timestampIncrement);
 
 	// 循环发送数据
@@ -631,7 +630,7 @@ void *RTPHandleThread(void *args)
 		dataBuf = NULL;
 	}
 
-	LOG("RTP thread exited\n");
+	LOG_INFO("RTP thread exited\n");
 	return (void*)0;
 }
 

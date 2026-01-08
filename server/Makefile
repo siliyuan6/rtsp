@@ -20,6 +20,7 @@ NETWORK_SRCS = $(wildcard network/*.c)
 CORE_SRCS = $(wildcard core/*.c)
 SAMPLE_SRCS = $(wildcard sample/*.c)
 RINGBUF_SRCS = $(wildcard $(COMMON_DIR)/ringbuf/*.c)
+LOG_SRCS = $(wildcard $(COMMON_DIR)/log.c)
 
 # 目标文件（在obj目录中，保持目录结构）
 API_OBJS = $(patsubst api/%.c, $(OBJ_DIR)/api/%.o, $(API_SRCS))
@@ -28,6 +29,8 @@ CORE_OBJS = $(patsubst core/%.c, $(OBJ_DIR)/core/%.o, $(CORE_SRCS))
 SAMPLE_OBJS = $(patsubst sample/%.c, $(OBJ_DIR)/sample/%.o, $(SAMPLE_SRCS))
 # ringbuf 目标文件：从 ../common/ringbuf/ringbuf.c 转换为 obj/ringbuf/ringbuf.o
 RINGBUF_OBJS = $(OBJ_DIR)/ringbuf/ringbuf.o
+# log 目标文件：从 ../common/log.c 转换为 obj/log/log.o
+LOG_OBJS = $(OBJ_DIR)/log/log.o
 
 # 库文件目标（不包括sample）
 LIB_OBJS = $(API_OBJS) $(NETWORK_OBJS) $(CORE_OBJS)
@@ -47,10 +50,15 @@ all: $(OBJ_DIR) libs sample
 $(OBJ_DIR):
 	@mkdir -p $(addprefix $(OBJ_DIR)/, $(SRC_DIRS))
 	@mkdir -p $(OBJ_DIR)/ringbuf
+	@mkdir -p $(OBJ_DIR)/log
 
 # 确保 ringbuf 目录存在
 $(OBJ_DIR)/ringbuf:
 	@mkdir -p $(OBJ_DIR)/ringbuf
+
+# 确保 log 目录存在
+$(OBJ_DIR)/log:
+	@mkdir -p $(OBJ_DIR)/log
 
 # 通用编译规则：从源文件编译到obj目录
 # 使用order-only依赖确保目录存在
@@ -70,9 +78,13 @@ $(OBJ_DIR)/sample/%.o: sample/%.c | $(OBJ_DIR)/sample
 $(OBJ_DIR)/ringbuf/ringbuf.o: $(COMMON_DIR)/ringbuf/ringbuf.c | $(OBJ_DIR)/ringbuf
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
+# log 编译规则
+$(OBJ_DIR)/log/log.o: $(COMMON_DIR)/log.c | $(OBJ_DIR)/log
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
 # 链接示例程序
-sample: $(LIB_OBJS) $(SAMPLE_OBJS) $(RINGBUF_OBJS)
-	$(CC) $(LIB_OBJS) $(SAMPLE_OBJS) $(RINGBUF_OBJS) -o $(TARGET) $(LDFLAGS)
+sample: $(LIB_OBJS) $(SAMPLE_OBJS) $(RINGBUF_OBJS) $(LOG_OBJS)
+	$(CC) $(LIB_OBJS) $(SAMPLE_OBJS) $(RINGBUF_OBJS) $(LOG_OBJS) -o $(TARGET) $(LDFLAGS)
 	@echo "Build completed: $(TARGET)"
 
 # 编译静态库
