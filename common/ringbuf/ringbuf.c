@@ -41,8 +41,8 @@ RingBuffer_t* RingBufferCreate(size_t capacity)
     rb->capacity = capacity;
     rb->readPos = 0;
     rb->writePos = 0;
-    rb->dataSize = 0;
-    rb->isClosed = 0;
+    rb->validDataSize = 0;
+    rb->isEnabled = 1;
 
     if (pthread_mutex_init(&rb->mutex, NULL) != 0)
     {
@@ -85,7 +85,7 @@ void RingBufferDestroy(RingBuffer_t* rb)
     }
 
     pthread_mutex_lock(&rb->mutex);
-    rb->isClosed = 1;
+    rb->isEnabled = 0;
     pthread_cond_broadcast(&rb->condRead);
     pthread_cond_broadcast(&rb->condWrite);
     pthread_mutex_unlock(&rb->mutex);
@@ -115,16 +115,16 @@ int RingBufferPush(RingBuffer_t* rb, const void* data, size_t size)
     pthread_mutex_lock(&rb->mutex);
 
     // 检查是否已关闭
-    if (rb->isClosed)
+    if (!rb->isEnabled)
     {
         pthread_mutex_unlock(&rb->mutex);
         return -1;
     }
 
     // 等待有足够空间
-    while ((rb->capacity - rb->dataSize) < size)
+    while ((rb->capacity - rb->validDataSize) < size)
     {
-        if (rb->isClosed)
+        if (!rb->isEnabled)
         {
             pthread_mutex_unlock(&rb->mutex);
             return -1;
@@ -145,7 +145,7 @@ int RingBufferPush(RingBuffer_t* rb, const void* data, size_t size)
         memcpy(rb->buffer + rb->writePos, src, toWrite);
 
         rb->writePos = (rb->writePos + toWrite) % rb->capacity;
-        rb->dataSize += toWrite;
+        rb->validDataSize += toWrite;
         remaining -= toWrite;
         src += toWrite;
     }
@@ -158,17 +158,14 @@ int RingBufferPush(RingBuffer_t* rb, const void* data, size_t size)
 }
 
 /**
- * @brief 从循环队列读取数据
+ * @brief 从循环队列读取指定长度的数据
  */
-int RingBufferPop(RingBuffer_t* rb, void* data, size_t maxSize, 
-                  size_t* actualSize, int timeoutMs)
+int RingBufferPop(RingBuffer_t* rb, void* data, size_t size, int timeoutMs)
 {
-    if (NULL == rb || NULL == data || NULL == actualSize || maxSize == 0)
+    if (NULL == rb || NULL == data || size == 0)
     {
         return -1;
     }
-
-    *actualSize = 0;
 
     pthread_mutex_lock(&rb->mutex);
 
@@ -188,10 +185,10 @@ int RingBufferPop(RingBuffer_t* rb, void* data, size_t maxSize,
         }
     }
 
-    // 等待有数据可读
-    while (rb->dataSize == 0)
+    // 等待有足够的数据可读（必须是指定长度的数据）
+    while (rb->validDataSize < size)
     {
-        if (rb->isClosed)
+        if (!rb->isEnabled)
         {
             pthread_mutex_unlock(&rb->mutex);
             return -1;
@@ -221,9 +218,8 @@ int RingBufferPop(RingBuffer_t* rb, void* data, size_t maxSize,
         }
     }
 
-    // 读取数据
-    size_t toRead = (maxSize < rb->dataSize) ? maxSize : rb->dataSize;
-    size_t remaining = toRead;
+    // 读取指定长度的数据
+    size_t remaining = size;
     unsigned char* dst = (unsigned char*)data;
 
     while (remaining > 0)
@@ -235,12 +231,10 @@ int RingBufferPop(RingBuffer_t* rb, void* data, size_t maxSize,
         memcpy(dst, rb->buffer + rb->readPos, toReadNow);
 
         rb->readPos = (rb->readPos + toReadNow) % rb->capacity;
-        rb->dataSize -= toReadNow;
+        rb->validDataSize -= toReadNow;
         remaining -= toReadNow;
         dst += toReadNow;
     }
-
-    *actualSize = toRead;
 
     // 唤醒等待写入的线程
     pthread_cond_broadcast(&rb->condWrite);
@@ -260,7 +254,7 @@ size_t RingBufferGetSize(RingBuffer_t* rb)
     }
 
     pthread_mutex_lock(&rb->mutex);
-    size_t size = rb->dataSize;
+    size_t size = rb->validDataSize;
     pthread_mutex_unlock(&rb->mutex);
 
     return size;
@@ -277,7 +271,7 @@ size_t RingBufferGetFree(RingBuffer_t* rb)
     }
 
     pthread_mutex_lock(&rb->mutex);
-    size_t free = rb->capacity - rb->dataSize;
+    size_t free = rb->capacity - rb->validDataSize;
     pthread_mutex_unlock(&rb->mutex);
 
     return free;
@@ -294,7 +288,7 @@ void RingBufferClose(RingBuffer_t* rb)
     }
 
     pthread_mutex_lock(&rb->mutex);
-    rb->isClosed = 1;
+    rb->isEnabled = 0;
     pthread_cond_broadcast(&rb->condRead);
     pthread_cond_broadcast(&rb->condWrite);
     pthread_mutex_unlock(&rb->mutex);
@@ -313,7 +307,7 @@ void RingBufferClear(RingBuffer_t* rb)
     pthread_mutex_lock(&rb->mutex);
     rb->readPos = 0;
     rb->writePos = 0;
-    rb->dataSize = 0;
+    rb->validDataSize = 0;
     pthread_cond_broadcast(&rb->condWrite);
     pthread_mutex_unlock(&rb->mutex);
 }

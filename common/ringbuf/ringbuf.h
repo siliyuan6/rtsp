@@ -20,15 +20,15 @@ extern "C" {
  */
 typedef struct RingBuffer_s
 {
+    int isEnabled;              // 缓冲区是否已启用
     unsigned char* buffer;      // 数据缓冲区
     size_t capacity;            // 缓冲区容量（字节）
     size_t readPos;             // 读位置
     size_t writePos;            // 写位置
-    size_t dataSize;            // 当前数据大小
+    size_t validDataSize;       // 有效数据大小（字节）
     pthread_mutex_t mutex;      // 互斥锁
     pthread_cond_t condRead;    // 读条件变量（有数据可读）
-    pthread_cond_t condWrite;    // 写条件变量（有空间可写）
-    int isClosed;               // 缓冲区是否已关闭
+    pthread_cond_t condWrite;   // 写条件变量（有空间可写）
 } RingBuffer_t;
 
 /**
@@ -56,16 +56,16 @@ void RingBufferDestroy(RingBuffer_t* rb);
 int RingBufferPush(RingBuffer_t* rb, const void* data, size_t size);
 
 /**
- * @brief 从循环队列读取数据（阻塞模式，支持超时）
+ * @brief 从循环队列读取指定长度的数据（阻塞模式，支持超时）
  * @param rb 循环队列指针
  * @param data 读取数据的缓冲区
- * @param maxSize 缓冲区最大容量
- * @param actualSize 实际读取的数据大小（输出参数）
+ * @param size 要读取的数据大小（字节）
  * @param timeoutMs 超时时间（毫秒），-1表示无限等待，0表示非阻塞
  * @return 成功返回0，超时返回1，缓冲区已关闭返回-1
+ * 
+ * @note 如果缓冲区中的数据不足指定长度，会阻塞等待直到有足够数据
  */
-int RingBufferPop(RingBuffer_t* rb, void* data, size_t maxSize, 
-                  size_t* actualSize, int timeoutMs);
+int RingBufferPop(RingBuffer_t* rb, void* data, size_t size, int timeoutMs);
 
 /**
  * @brief 获取当前数据大小

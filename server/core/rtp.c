@@ -25,6 +25,9 @@
 #define FU_A_MID 0x00
 #define FU_A_END 0x40
 
+// 静态RTP包数组大小，支持大帧（1080p I帧约需150个包）
+#define MAX_RTP_PACKETS_STATIC 256
+
 /**
  * @brief H.264 NALU类型
  */
@@ -168,7 +171,8 @@ static int RTPEncapsulateH264Fragmented(const unsigned char *nalu,
 		maxFragmentSize;
 	if (fragmentCount > maxPackets)
 	{
-		LOG_ERR("Too many fragments: %d\n", fragmentCount);
+		LOG_ERR("Frame too large: need %d packets, max %d (frame size: %d bytes)\n", 
+			fragmentCount, maxPackets, len);
 		return -1;
 	}
 
@@ -366,7 +370,7 @@ int RTPSendFragmented(int rtpFd, struct sockaddr_in *clientAddr,
 	const unsigned char *nalu, int len, unsigned short *seq,
 	unsigned int *timestamp)
 {
-	RtpPacket_t rtpPackets[32];
+	RtpPacket_t rtpPackets[MAX_RTP_PACKETS_STATIC];
 	int fragmentCount = 0;
 	int sent = 0;
 
@@ -381,7 +385,7 @@ int RTPSendFragmented(int rtpFd, struct sockaddr_in *clientAddr,
 
 	// 封装RTP包
 	fragmentCount = RTPEncapsulateH264Fragmented(nalu, len,
-		rtpPackets, 32);
+		rtpPackets, MAX_RTP_PACKETS_STATIC);
 	if (fragmentCount <= 0)
 	{
 		return -1;
@@ -448,7 +452,7 @@ int RTPSendData(int rtpFd, struct sockaddr_in *clientAddr,
 	RTSPStreamFormat_t format, const unsigned char *data, int len,
 	unsigned short *seq, unsigned int *timestamp)
 {
-	RtpPacket_t rtpPackets[32];
+	RtpPacket_t rtpPackets[MAX_RTP_PACKETS_STATIC];
 	int packetCount = 0;
 	int sent = 0;
 
@@ -463,7 +467,7 @@ int RTPSendData(int rtpFd, struct sockaddr_in *clientAddr,
 
 	// 封装RTP包
 	packetCount = RTPEncapsulate(format, data, len, 
-		rtpPackets, sizeof(rtpPackets));
+		rtpPackets, MAX_RTP_PACKETS_STATIC);
 	if (packetCount <= 0)
 	{
 		return -1;
