@@ -71,7 +71,7 @@ static int SendRTSPResponse(int clientFd, int statusCode,
 		len += snprintf(response + len, sizeof(response) - len, "\r\n");
 	}
 
-	LOG_INFO(">>>>>>>>>>> Send RTSP response: %s\n", response);
+	LOG_DEBUG(">>>>>>>>>>> Send RTSP response: %s\n", response);
 	// 发送响应
 	int sent = send(clientFd, response, len, 0);
 	if (sent != len)
@@ -474,6 +474,42 @@ int RTSPHandlePlay(int clientFd, const char *request, RTSPHandle_t *handle)
 }
 
 /**
+ * @brief 停止RTP线程
+ * 
+ * @param handle RTSP句柄指针
+ */
+static void StopRtpThread(RTSPHandle_t *handle)
+{
+	if (handle == NULL)
+	{
+		return;
+	}
+
+	pthread_mutex_lock(&handle->mutex);
+	
+	// 如果RTP线程不存在，直接返回
+	if (handle->rtpThread == 0)
+	{
+		pthread_mutex_unlock(&handle->mutex);
+		return;
+	}
+	
+	// 设置标志，让RTP线程退出
+	handle->hasActiveRtpSession = 0;
+	
+	// 保存线程ID，然后清零，避免重复等待
+	pthread_t rtpThread = handle->rtpThread;
+	handle->rtpThread = 0;
+	
+	pthread_mutex_unlock(&handle->mutex);
+	
+	// 在锁外等待线程退出，避免死锁
+	LOG_INFO("Waiting for RTP thread to exit...\n");
+	pthread_join(rtpThread, NULL);
+	LOG_INFO("RTP thread exited\n");
+}
+
+/**
  * @brief 处理TEARDOWN请求
  * 
  * @param clientFd 客户端socket文件描述符
@@ -610,107 +646,121 @@ void *RTSPHandleThread(void *args)
 			continue;
 		}
 
-	// 接受客户端连接
-	struct sockaddr_in clientAddr;
-	socklen_t clientAddrLen = sizeof(clientAddr);
-	clientFd = accept(handle->rtspFd, (struct sockaddr*)&clientAddr,
-		&clientAddrLen);
-	if (clientFd < 0)
+		// 接受客户端连接
+		struct sockaddr_in clientAddr;
+		socklen_t clientAddrLen = sizeof(clientAddr);
+		clientFd = accept(handle->rtspFd, (struct sockaddr*)&clientAddr, &clientAddrLen);
+		if (clientFd < 0)
 		{
 			if (handle->isRunning)
-	{
-		LOG_ERR("accept failed\n");
+			{
+				LOG_ERR("accept failed\n");
 			}
 			continue; // 继续等待下一个连接
-	}
+		}
 
-	handle->clientAddr = clientAddr;
-	LOG_INFO("Client connected from %s:%d\n", inet_ntoa(clientAddr.sin_addr), 
+		handle->clientAddr = clientAddr;
+		LOG_INFO("Client connected from %s:%d\n", inet_ntoa(clientAddr.sin_addr), 
 		ntohs(clientAddr.sin_port));
 
 		// 内层循环：处理当前客户端的RTSP请求
-	while (handle->isRunning)
-	{
-		// 接收请求
-		recvLen = recv(clientFd, requestBuf, sizeof(requestBuf) - 1, 0);
-		if (recvLen <= 0)
+		while (handle->isRunning)
 		{
-			if (recvLen < 0)
+			// 接收请求
+			recvLen = recv(clientFd, requestBuf, sizeof(requestBuf) - 1, 0);
+			if (recvLen <= 0)
 			{
-				LOG_ERR("recv failed\n");
-			}
+				if (recvLen < 0)
+				{
+					LOG_ERR("recv failed\n");
+				}
 				else
 				{
 					LOG_INFO("Client disconnected\n");
 				}
+				// 停止RTP线程
+				StopRtpThread(handle);
 				// 客户端断开，关闭连接并跳出内层循环，等待新连接
 				close(clientFd);
 				clientFd = -1;
-			break;
-		}
+				break;
+			}
 
-		requestBuf[recvLen] = '\0';
-		LOG_INFO(">>>>>>>>>>> Received RTSP request:\n%s\n", requestBuf);
+			requestBuf[recvLen] = '\0';
+			LOG_DEBUG(">>>>>>>>>>> Received RTSP request:\n%s\n", requestBuf);
 
-		// 解析请求
-		if (ParseRTSPRequest(requestBuf, method, url) < 0)
-		{
-			LOG_ERR("ParseRTSPRequest failed\n");
-			SendRTSPResponse(clientFd, 400, "Bad Request", NULL, NULL);
-			continue;
-		}
-
-		// 处理不同的请求方法
-		if (strcmp(method, "OPTIONS") == 0)
-		{
-			RTSPHandleOptions(clientFd, requestBuf);
-		}
-		else if (strcmp(method, "DESCRIBE") == 0)
-		{
-			RTSPHandleDescribe(clientFd, requestBuf, &handle->config);
-		}
-		else if (strcmp(method, "SETUP") == 0)
-		{
-			RTSPHandleSetup(clientFd, requestBuf, handle);
-		}
-		else if (strcmp(method, "PLAY") == 0)
-		{
-				if (RTSPHandlePlay(clientFd, requestBuf, handle) == 0)
+			// 解析请求
+			if (ParseRTSPRequest(requestBuf, method, url) < 0)
 			{
-				// 检查RTP socket是否已创建
-				if (handle->rtpFd >= 0)
+				LOG_ERR("ParseRTSPRequest failed\n");
+				SendRTSPResponse(clientFd, 400, "Bad Request", NULL, NULL);
+				continue;
+			}
+
+			// 处理不同的请求方法
+			if (strcmp(method, "OPTIONS") == 0)
+			{
+				RTSPHandleOptions(clientFd, requestBuf);
+			}
+			else if (strcmp(method, "DESCRIBE") == 0)
+			{
+				RTSPHandleDescribe(clientFd, requestBuf, &handle->config);
+			}
+			else if (strcmp(method, "SETUP") == 0)
+			{
+				RTSPHandleSetup(clientFd, requestBuf, handle);
+			}
+			else if (strcmp(method, "PLAY") == 0)
+			{
+				if (RTSPHandlePlay(clientFd, requestBuf, handle) == 0)
 				{
-					// 启动RTP发送线程
-					if (pthread_create(&handle->rtpThread, NULL,
-						RTPHandleThread, handle) != 0)
+					// 检查RTP socket是否已创建
+					if (handle->rtpFd >= 0)
 					{
-						LOG_ERR("pthread_create RTP thread failed\n");
+						// 如果RTP线程已存在，先停止它
+						StopRtpThread(handle);
+						
+						// 设置RTP会话标志
+						pthread_mutex_lock(&handle->mutex);
+						handle->hasActiveRtpSession = 1;
+						pthread_mutex_unlock(&handle->mutex);
+						
+						// 启动RTP发送线程
+						if (pthread_create(&handle->rtpThread, NULL,
+							RTPHandleThread, handle) != 0)
+						{
+							LOG_ERR("pthread_create RTP thread failed\n");
+							// 创建失败，清除标志
+							pthread_mutex_lock(&handle->mutex);
+							handle->hasActiveRtpSession = 0;
+							pthread_mutex_unlock(&handle->mutex);
+						}
+						else
+						{
+							LOG_INFO("RTP thread created\n");
+						}
 					}
 					else
 					{
-						LOG_INFO("RTP thread created\n");
+						LOG_ERR("RTP socket not created yet\n");
 					}
 				}
-				else
-				{
-					LOG_ERR("RTP socket not created yet\n");
-				}
 			}
-		}
-		else if (strcmp(method, "TEARDOWN") == 0)
-		{
-				RTSPHandleTeardown(clientFd, requestBuf, handle);
-				// TEARDOWN后关闭当前连接，但继续监听新连接
-				close(clientFd);
-				clientFd = -1;
-				break; // 跳出内层循环，等待新连接
-		}
-		else
-		{
-			LOG_ERR("Unsupported method: %s\n", method);
-			SendRTSPResponse(clientFd, 501, "Not Implemented",
-				NULL, NULL);
-		}
+			else if (strcmp(method, "TEARDOWN") == 0)
+			{
+					RTSPHandleTeardown(clientFd, requestBuf, handle);
+					// 停止RTP线程
+					StopRtpThread(handle);
+					// TEARDOWN后关闭当前连接，但继续监听新连接
+					close(clientFd);
+					clientFd = -1;
+					break; // 跳出内层循环，等待新连接
+			}
+			else
+			{
+				LOG_ERR("Unsupported method: %s\n", method);
+				SendRTSPResponse(clientFd, 501, "Not Implemented", NULL, NULL);
+			}
 		} // 内层循环结束
 
 		// 如果客户端连接还存在，关闭它

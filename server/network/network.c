@@ -121,6 +121,15 @@ static int CreateUdpSocket(int port)
 		return -1;
 	}
 
+	// 设置发送缓冲区大小，减少UDP丢包（256KB）
+	int sendBufSize = 256 * 1024;
+	ret = setsockopt(sock, SOL_SOCKET, SO_SNDBUF,
+		(char*)&sendBufSize, sizeof(sendBufSize));
+	if (ret != 0)
+	{
+		LOG_WARN("setsockopt SO_SNDBUF failed, continuing anyway\n");
+	}
+
 	// 绑定本地端口
 	memset(&localAddr, 0, sizeof(localAddr));
 	localAddr.sin_family = AF_INET;

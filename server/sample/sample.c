@@ -21,17 +21,28 @@
 #include "api/rtsp_api.h"
 #include "common/log.h"
 #include "common/ringbuf/ringbuf.h"
+#include "common/h264_parser/h264_parser.h"
 
 /* 通过宏定义指定网卡名称，例如 wlan0, eth0 等 */
 #ifndef NETWORK_INTERFACE
 #define NETWORK_INTERFACE "wlan0"
 #endif
 
-static RTSPHandle_t *g_handle = NULL;
-static RingBuffer_t *g_ringbuf = NULL;
-static pthread_t g_read_thread = 0;
-static int g_thread_running = 0;
-static char *g_stream_file = NULL;
+/**
+ * @brief 应用程序上下文结构体
+ */
+typedef struct {
+	H264Parser_t *h264_parser;    // H264解析器
+	RingBuffer_t *ringbuf;        // 环形缓冲区
+	RTSPHandle_t *rtsp_handle;    // RTSP句柄
+	pthread_t parseThread;        // 解析线程ID
+	int running;                  // 运行标志
+	char *streamFilePath;         // 流文件路径
+	int videoFps;                 // 帧率
+} AppContext_t;
+
+// 全局上下文指针（用于回调函数访问）
+static AppContext_t *g_appCtx = NULL;
 
 
 /**
@@ -44,482 +55,204 @@ static void SignalHandler(int sig)
 	if (sig == SIGINT || sig == SIGTERM)
 	{
 		LOG_INFO("Received signal %d, shutting down...\n", sig);
-		g_thread_running = 0;
-		if (NULL != g_ringbuf)
+		if (g_appCtx != NULL)
 		{
-			RingBufferClose(g_ringbuf);
-		}
-		if (NULL != g_handle)
-		{
-			RTSPDestroy(g_handle);
-			g_handle = NULL;
+			g_appCtx->running = 0;
+			if (g_appCtx->ringbuf != NULL)
+			{
+				RingBufferClose(g_appCtx->ringbuf);
+			}
 		}
 		exit(0);
 	}
 }
 
 /**
- * @brief 覆盖写模式推送数据到ringbuf
- * 
- * 如果ringbuf空间不足，会丢弃最旧的一帧数据，然后再推送新数据
+ * @brief 推送帧数据到ringbuf
  * 
  * @param rb ringbuf指针
- * @param data 要推送的数据
- * @param size 数据大小
+ * @param frameData 帧数据指针
+ * @param frameSize 帧大小
  * @return 成功返回0，失败返回-1
  */
-static int RingBufferPushOverwrite(RingBuffer_t *rb, const void *data, size_t size)
+static int PushFrameToRingbuf(RingBuffer_t *rb, const unsigned char *frameData, 
+	size_t frameSize)
 {
-	if (NULL == rb || NULL == data || size == 0)
+	if (rb == NULL || frameData == NULL || frameSize == 0)
 	{
 		return -1;
 	}
 
-	// 检查是否有足够空间
-	size_t free_size = RingBufferGetFree(rb);
-	
-	// 如果空间不足，丢弃最旧的数据直到有足够空间
-	if (free_size < size)
+	// 先推送4字节的长度字段（主机字节序）
+	unsigned int frameSizeTmp = (unsigned int)frameSize;
+	int ret = RingBufferPush(rb, &frameSizeTmp, sizeof(frameSizeTmp));
+	if (ret < 0)
 	{
-		unsigned int frame_size_net = 0;
-		unsigned int frame_size = 0;
-		size_t actualSize = 0;
-		unsigned char discard_buf[512 * 1024]; // 512KB丢弃缓冲区
-		int ret = 0;
-		int discard_count = 0;
-		
-		LOG_DEBUG("[RingBuf] Space insufficient, need %zu bytes, free %zu bytes, discarding old frames...\n",
-			size, free_size);
-		
-		// 循环丢弃帧，直到有足够空间或没有数据可丢弃
-		while (free_size < size)
-		{
-			// 尝试读取并丢弃一帧（非阻塞模式）
-			ret = RingBufferPop(rb, &frame_size_net, sizeof(frame_size_net), 
-				&actualSize, 0);
-			if (ret != 0 || actualSize != sizeof(frame_size_net))
-			{
-				// 没有更多数据可丢弃
-				LOG_ERR("[RingBuf] No more data to discard, need %zu bytes, free %zu bytes\n",
-					size, free_size);
-				// 如果仍然空间不足，尝试强制推送（可能会阻塞，但至少不会死锁）
-				break;
-			}
-			
-			frame_size = ntohl(frame_size_net);
-			if (frame_size == 0 || frame_size > sizeof(discard_buf))
-			{
-				LOG_ERR("[RingBuf] Invalid frame size to discard: %u\n", frame_size);
-				break;
-			}
-			
-			// 丢弃帧数据
-			ret = RingBufferPop(rb, discard_buf, frame_size, &actualSize, 0);
-			if (ret == 0 && actualSize == frame_size)
-			{
-				discard_count++;
-				LOG_DEBUG("[RingBuf] Discarded old frame #%d: %u bytes\n", discard_count, frame_size);
-			}
-			else
-			{
-				LOG_ERR("[RingBuf] Failed to discard frame data, ret=%d, actualSize=%zu\n",
-					ret, actualSize);
-				break;
-			}
-			
-			// 重新检查空间
-			free_size = RingBufferGetFree(rb);
-		}
-		
-		LOG_DEBUG("[RingBuf] Discarded %d frames, free space now: %zu bytes\n", discard_count, free_size);
-	}
-	
-	// 推送新数据（现在应该有足够空间了，如果没有，RingBufferPush会阻塞等待）
-	return RingBufferPush(rb, data, size);
-}
-
-/**
- * @brief 查找H.264起始码
- * 
- * @param data 数据缓冲区
- * @param size 缓冲区大小
- * @param offset 起始偏移量
- * @param startcode_len 输出参数，返回起始码长度（3或4），可为NULL
- * @return 找到起始码返回起始码的开始位置，未找到返回-1
- */
-static int FindStartCode(const unsigned char *data, int size, int offset, int *startcode_len)
-{
-	int i;
-	for (i = offset; i < size - 3; i++)
-	{
-		// 查找 0x00 0x00 0x00 0x01 或 0x00 0x00 0x01
-		if (data[i] == 0x00 && data[i+1] == 0x00)
-		{
-			if (i + 3 < size && data[i+2] == 0x00 && data[i+3] == 0x01)
-			{
-				if (startcode_len != NULL)
-				{
-					*startcode_len = 4;
-				}
-				return i; // 返回起始码的开始位置
-			}
-			else if (i + 2 < size && data[i+2] == 0x01)
-			{
-				if (startcode_len != NULL)
-				{
-					*startcode_len = 3;
-				}
-				return i; // 返回起始码的开始位置
-			}
-		}
-	}
-	return -1;
-}
-
-/**
- * @brief 读取码流文件线程函数
- * 
- * 不断读取码流文件，按帧（通过起始码分隔）推送到循环队列
- * 
- * @param arg 线程参数（未使用）
- * @return 线程返回值
- */
-static void* StreamReadThread(void *arg)
-{
-	(void) arg;
-	int ret = prctl(PR_SET_NAME, "StreamRead", 0, 0, 0);
-	if (ret != 0)
-	{
-		LOG_WARN("Failed to set StreamRead thread name\n");
-	}
-	FILE *fp = NULL;
-	unsigned char *read_buf = NULL;
-	int read_buf_size = 1024 * 1024; // 1MB读取缓冲区
-	int frame_buf_size = 512 * 1024; // 512KB帧缓冲区
-	unsigned char *frame_buf = NULL;
-	int start_pos = 0;
-	int next_frame_start = 0;
-	int frame_size = 0;
-
-	if (NULL == g_stream_file)
-	{
-		LOG_ERR("Stream file path is NULL\n");
-		return NULL;
-	}
-
-	// 打开码流文件
-	fp = fopen(g_stream_file, "rb");
-	if (NULL == fp)
-	{
-		LOG_ERR("Failed to open stream file: %s\n", g_stream_file);
-		return NULL;
-	}
-
-	// 分配读取缓冲区
-	read_buf = (unsigned char *)malloc(read_buf_size);
-	if (NULL == read_buf)
-	{
-		LOG_ERR("Failed to allocate read buffer\n");
-		fclose(fp);
-		return NULL;
-	}
-
-	// 分配帧缓冲区
-	frame_buf = (unsigned char *)malloc(frame_buf_size);
-	if (NULL == frame_buf)
-	{
-		LOG_ERR("Failed to allocate frame buffer\n");
-		free(read_buf);
-		fclose(fp);
-		return NULL;
-	}
-
-	LOG_INFO("Stream read thread started, reading from: %s\n", g_stream_file);
-
-	// 读取文件数据到缓冲区
-	int data_in_buf = 0;
-
-	while (g_thread_running)
-	{
-		// 如果缓冲区数据不足，从文件读取更多数据
-		if (data_in_buf < 1024)
-		{
-			int read_size = fread(read_buf + data_in_buf, 1, 
-				read_buf_size - data_in_buf, fp);
-			if (read_size <= 0)
-			{
-				// 文件读取完毕，重新开始（循环播放）
-				if (feof(fp))
-				{
-					LOG_DEBUG("[StreamRead] File EOF reached, restarting from beginning...\n");
-					fseek(fp, 0, SEEK_SET);
-					clearerr(fp);
-					data_in_buf = 0;
-					start_pos = 0;
-					continue;
-				}
-				else
-				{
-					// 读取错误
-					LOG_ERR("[StreamRead] File read error: %d\n", ferror(fp));
-					break;
-				}
-			}
-			data_in_buf += read_size;
-			LOG_DEBUG("[StreamRead] Read %d bytes from file, total in buffer: %d\n", 
-				read_size, data_in_buf);
-		}
-
-		// 查找第一个起始码
-		if (start_pos == 0)
-		{
-			int startcode_len = 0;
-			start_pos = FindStartCode(read_buf, data_in_buf, 0, &startcode_len);
-			if (start_pos < 0)
-			{
-				// 未找到起始码，清空缓冲区，继续读取
-				LOG_DEBUG("[StreamRead] No start code found, clearing buffer\n");
-				data_in_buf = 0;
-				start_pos = 0;
-				usleep(10000); // 等待10ms
-				continue;
-			}
-			// start_pos 已经是起始码的开始位置，可以直接使用
-			LOG_DEBUG("[StreamRead] Found start code at position %d\n", start_pos);
-		}
-
-		// 查找下一个起始码（确定帧边界）
-		// 从当前帧的起始码后开始查找
-		int search_start = start_pos + 4; // 至少跳过当前起始码
-		int next_startcode_len = 0;
-		next_frame_start = FindStartCode(read_buf, data_in_buf, search_start, &next_startcode_len);
-		if (next_frame_start < 0)
-		{
-			// 未找到下一个起始码，可能需要读取更多数据
-			if (data_in_buf >= read_buf_size - 1024)
-			{
-				// 缓冲区快满了，将剩余数据作为一帧
-				frame_size = data_in_buf - start_pos;
-				LOG_DEBUG("[StreamRead] Buffer full, using remaining data as frame, size: %d\n", frame_size);
-			}
-			else
-			{
-				// 继续读取更多数据
-				LOG_DEBUG("[StreamRead] No next start code found, reading more data from file...\n");
-				int read_size = fread(read_buf + data_in_buf, 1, 
-					read_buf_size - data_in_buf, fp);
-				if (read_size > 0)
-				{
-					data_in_buf += read_size;
-					LOG_DEBUG("[StreamRead] Read %d more bytes, total in buffer: %d\n", read_size, data_in_buf);
-					continue; // 重新查找下一个起始码
-				}
-				else if (feof(fp))
-				{
-					// 文件读取完毕，将剩余数据作为一帧
-					frame_size = data_in_buf - start_pos;
-					LOG_DEBUG("[StreamRead] File EOF, using remaining data as frame, size: %d\n", 
-						frame_size);
-				}
-				else
-				{
-					// 读取错误
-					LOG_ERR("[StreamRead] File read error: %d\n", ferror(fp));
-					break;
-				}
-			}
-		}
-		else
-		{
-			// 找到下一个起始码，next_frame_start 已经是起始码的开始位置
-			// 计算当前帧的大小（包含起始码）
-			frame_size = next_frame_start - start_pos;
-			LOG_DEBUG("[StreamRead] Found next start code at %d, frame size: %d\n", 
-				next_frame_start, frame_size);
-		}
-
-		// 检查帧大小是否合理
-		if (frame_size <= 0 || frame_size > frame_buf_size)
-		{
-			LOG_ERR("Invalid frame size: %d\n", frame_size);
-			data_in_buf = 0;
-			start_pos = 0;
-			continue;
-		}
-
-		// 复制帧数据到帧缓冲区
-		memcpy(frame_buf, read_buf + start_pos, frame_size);
-
-		// 推送到循环队列（先推送长度字段，再推送数据，支持覆盖写）
-		LOG_DEBUG("[StreamRead] Pushing frame to ringbuf, size: %d bytes\n", frame_size);
-		// 先推送4字节的长度字段（网络字节序）
-		unsigned int frame_size_net = htonl((unsigned int)frame_size);
-		ret = RingBufferPushOverwrite(g_ringbuf, &frame_size_net, sizeof(frame_size_net));
-		if (ret < 0)
-		{
-			LOG_ERR("[StreamRead] Failed to push frame size to ring buffer (closed?)\n");
-			break;
-		}
-		LOG_DEBUG("[StreamRead] Frame size pushed, now pushing frame data...\n");
-		// 再推送帧数据
-		ret = RingBufferPushOverwrite(g_ringbuf, frame_buf, frame_size);
-		if (ret < 0)
-		{
-			LOG_ERR("[StreamRead] Failed to push frame data to ring buffer (closed?)\n");
-			break;
-		}
-		LOG_DEBUG("[StreamRead] Frame data pushed successfully\n");
-		
-		// 打印ringbuf数据信息
-		size_t data_size = RingBufferGetSize(g_ringbuf);
-		size_t free_size = RingBufferGetFree(g_ringbuf);
-		size_t capacity = data_size + free_size;
-		double usage = capacity > 0 ? (double)data_size * 100.0 / capacity : 0.0;
-		LOG_DEBUG("[RingBuf Push] Frame: %d bytes, DataSize: %zu bytes, FreeSize: %zu bytes, Usage: %.2f%%\n",
-			frame_size, data_size, free_size, usage);
-
-		// 更新缓冲区状态
-		if (next_frame_start > 0)
-		{
-			// next_frame_start 是下一个帧的起始位置
-			// 移动剩余数据到缓冲区开头
-			int remaining = data_in_buf - next_frame_start;
-			if (remaining > 0)
-			{
-				memmove(read_buf, read_buf + next_frame_start, remaining);
-			}
-			data_in_buf = remaining;
-			start_pos = 0;
-		}
-		else
-		{
-			// 已处理完所有数据
-			data_in_buf = 0;
-			start_pos = 0;
-		}
-
-		// 控制读取速度（根据FPS，这里假设25fps）
-		LOG_DEBUG("[StreamRead] Frame processed, sleeping 40ms...\n");
-		usleep(40000); // 40ms = 25fps
-		LOG_DEBUG("[StreamRead] Woke up, continuing loop...\n");
-	}
-	
-	LOG_DEBUG("[StreamRead] Thread exiting, g_thread_running=%d\n", g_thread_running);
-
-	// 清理资源
-	if (read_buf != NULL)
-	{
-		free(read_buf);
-	}
-	if (frame_buf != NULL)
-	{
-		free(frame_buf);
-	}
-	if (fp != NULL)
-	{
-		fclose(fp);
-	}
-
-	LOG_INFO("Stream read thread exited\n");
-	return NULL;
-}
-
-/**
- * @brief 初始化码流读取功能
- * 
- * 创建循环队列并启动读取线程
- * 
- * @param stream_file 码流文件路径
- * @param ringbuf_size 循环队列大小（字节），默认2MB
- * @return 成功返回0，失败返回-1
- */
-static int InitStreamReader(const char *stream_file, size_t ringbuf_size)
-{
-	int ret = 0;
-
-	if (NULL == stream_file)
-	{
-		LOG_ERR("Stream file path is NULL\n");
+		LOG_ERR("[ParserThread] Failed to push frame size to ringbuf\n");
 		return -1;
 	}
 
-	// 分配文件路径字符串
-	g_stream_file = strdup(stream_file);
-	if (NULL == g_stream_file)
+	// 再推送帧数据
+	ret = RingBufferPush(rb, frameData, frameSize);
+	if (ret < 0)
 	{
-		LOG_ERR("Failed to allocate memory for stream file path\n");
+		LOG_ERR("[ParserThread] Failed to push frame data to ringbuf\n");
 		return -1;
 	}
 
-	// 创建循环队列
-	if (ringbuf_size == 0)
-	{
-		ringbuf_size = 2 * 1024 * 1024; // 默认2MB
-	}
-	g_ringbuf = RingBufferCreate(ringbuf_size);
-	if (NULL == g_ringbuf)
-	{
-		LOG_ERR("Failed to create ring buffer\n");
-		free(g_stream_file);
-		g_stream_file = NULL;
-		return -1;
-	}
+	LOG_DEBUG("[ParserThread] Frame pushed: size=%zu, ringbuf usage: %zu/%zu\n",
+		frameSize, RingBufferGetUsedSize(rb), RingBufferGetUsedSize(rb) + RingBufferGetFreeSize(rb));
 
-	LOG_INFO("Ring buffer created, size: %zu bytes\n", ringbuf_size);
-
-	// 启动读取线程
-	g_thread_running = 1;
-	ret = pthread_create(&g_read_thread, NULL, StreamReadThread, NULL);
-	if (ret != 0)
-	{
-		LOG_ERR("Failed to create read thread\n");
-		RingBufferDestroy(g_ringbuf);
-		g_ringbuf = NULL;
-		free(g_stream_file);
-		g_stream_file = NULL;
-		g_thread_running = 0;
-		return -1;
-	}
-
-	LOG_INFO("Stream reader initialized successfully\n");
 	return 0;
 }
 
 /**
- * @brief 清理码流读取功能
+ * @brief 清空ringbuf中的所有数据项
+ * 
+ * 通过逐个读取并丢弃ringbuf中的数据项来清空ringbuf
+ * 数据格式：4字节长度字段 + 帧数据
+ * 
+ * @param rb ringbuf指针
+ * @return 成功返回0，失败返回-1
  */
-static void CleanupStreamReader(void)
+static int ClearRingbufAllItems(RingBuffer_t *rb)
 {
-	// 停止线程
-	g_thread_running = 0;
-	if (g_ringbuf != NULL)
+	int ret = 0;
+	unsigned int itemLen = 0;
+	unsigned char *bufPtr = NULL;
+
+	if (rb == NULL)
 	{
-		RingBufferClose(g_ringbuf);
+		LOG_ERR("Invalid ringbuf pointer\n");
+		return -1;
 	}
 
-	// 等待线程结束
-	if (g_read_thread != 0)
+	// 分配临时缓冲区用于丢弃数据
+	bufPtr = (unsigned char *)malloc(1024 * 1024); // 1MB临时缓冲区
+	if (bufPtr == NULL)
 	{
-		pthread_join(g_read_thread, NULL);
-		g_read_thread = 0;
+		LOG_ERR("Failed to allocate temporary buffer for clearing ringbuf\n");
+		return -1;
 	}
 
-
-	// 销毁循环队列
-	if (g_ringbuf != NULL)
+	// 循环读取并丢弃所有数据项
+	while (RingBufferGetItemCount(rb) > 0)
 	{
-		RingBufferDestroy(g_ringbuf);
-		g_ringbuf = NULL;
+		// 读取长度字段
+		ret = RingBufferPop(rb, &itemLen, sizeof(unsigned int), 100);
+		if (ret != 0 || itemLen <= 0)
+		{
+			LOG_DEBUG("Failed to read item length during ringbuf clear, ret=%d\n", ret);
+			break;
+		}
+
+		// 检查长度是否合理
+		if (itemLen > 1024 * 1024)
+		{
+			LOG_WARN("Item length too large: %u, skipping\n", itemLen);
+			break;
+		}
+
+		// 读取并丢弃数据
+		ret = RingBufferPop(rb, bufPtr, itemLen, 100);
+		if (ret != 0)
+		{
+			LOG_DEBUG("Failed to read item data during ringbuf clear, ret=%d\n", ret);
+			break;
+		}
 	}
 
-	// 释放文件路径
-	if (g_stream_file != NULL)
+	free(bufPtr);
+	bufPtr = NULL;
+
+	return 0;
+}
+
+/**
+ * @brief 解析线程函数
+ * 
+ * 使用 h264_parser 解析码流文件，将帧推送到 ringbuf
+ * 
+ * @param arg 线程参数（AppContext_t*）
+ * @return NULL
+ */
+static void* ParseThread(void *arg)
+{
+	AppContext_t *ctx = (AppContext_t *)arg;
+	int ret = prctl(PR_SET_NAME, "H264Parser", 0, 0, 0);
+	if (ret != 0)
 	{
-		free(g_stream_file);
-		g_stream_file = NULL;
+		LOG_WARN("[ParserThread] Failed to set thread name\n");
 	}
 
-	LOG_INFO("Stream reader cleaned up\n");
+	LOG_INFO("[ParserThread] Thread started, parsing file: %s\n", ctx->streamFilePath);
+
+	// 分配帧缓冲区（用于拷贝帧数据，避免内部缓冲区被覆盖）
+	unsigned char *frameBuf = (unsigned char *)malloc(2 * 1024 * 1024); // 2MB
+	if (frameBuf == NULL)
+	{
+		LOG_ERR("[ParserThread] Failed to allocate frame buffer\n");
+		ctx->running = 0;
+		return NULL;
+	}
+
+	H264Frame_t frame;
+
+	// 循环解析帧
+	while (ctx->running)
+	{
+		size_t freeSize = RingBufferGetFreeSize(ctx->ringbuf);
+		size_t minBufSize = 4 + 32; // 最小缓冲区需求：4字节长度 + 32字节帧数据
+		if (freeSize < minBufSize)
+		{
+			// 缓冲区空间不足，稍作等待
+			usleep(10*1000); // 10ms
+			continue;
+		}
+		
+		// 获取下一帧
+		int result = H264ParserNextFrame(ctx->h264_parser, &frame);
+		if (result < 0)
+		{
+			LOG_ERR("[ParserThread] Failed to get next frame\n");
+			break;
+		}
+		else if (result > 0)
+		{
+			// EOF（仅在 loop_enabled=0 时）
+			LOG_INFO("[ParserThread] End of file reached, total frames\n");
+			break;
+		}
+
+		// 检查帧大小
+		if (frame.size > 2 * 1024 * 1024)
+		{
+			LOG_ERR("[ParserThread] Frame too large: %zu bytes\n", frame.size);
+			continue;
+		}
+		
+		// 立即拷贝帧数据到缓冲区（因为 frame.data 指向内部缓冲区，可能被覆盖）
+		memcpy(frameBuf, frame.data, frame.size);
+
+		// 推送到 ringbuf（使用拷贝后的数据）
+		if (PushFrameToRingbuf(ctx->ringbuf, frameBuf, frame.size) < 0)
+		{
+			LOG_ERR("[ParserThread] Failed to push frame to ringbuf, stopping\n");
+			break;
+		}
+
+		// 控制读取速度（根据FPS动态计算）
+		if (ctx->videoFps > 0)
+		{
+			unsigned int sleep_us = 1000000 / ctx->videoFps;
+			usleep(sleep_us);
+		}
+	}
+
+	free(frameBuf);
+
+	LOG_INFO("[ParserThread] Thread exited, total frames parsed");
+	return NULL;
 }
 
 /**
@@ -534,73 +267,94 @@ static void CleanupStreamReader(void)
  */
 static int GetDataCallback(unsigned char *buf, unsigned int bufSize)
 {
-	size_t actualSize = 0;
 	int ret = 0;
-	unsigned int frame_size_net = 0;
-	unsigned int frame_size = 0;
+	unsigned int frameSize = 0;
+	static int lastRtpSessionState = 0; // 上次RTP会话状态
 
 	if (NULL == buf || bufSize <= 0)
 	{
 		return -1;
 	}
 
-	// 如果循环队列未初始化，返回0（无数据）
-	if (NULL == g_ringbuf)
+	// 如果上下文未初始化，返回0（无数据）
+	if (g_appCtx == NULL || g_appCtx->ringbuf == NULL)
 	{
 		return 0;
 	}
 
-	// 第一步：从ringbuf读取4字节长度字段
-	ret = RingBufferPop(g_ringbuf, &frame_size_net, sizeof(frame_size_net), 
-		&actualSize, 100);
+	// 检测RTP会话状态变化：如果从非活跃变为活跃，说明是新客户端连接成功
+	// 在第一次getData调用前清空ringbuf，保证数据是实时的
+	int justCleared = 0;
+	if (g_appCtx->rtsp_handle != NULL)
+	{
+		int currentRtpSessionState = 0;
+		// 使用互斥锁安全访问hasActiveRtpSession
+		pthread_mutex_lock(&g_appCtx->rtsp_handle->mutex);
+		currentRtpSessionState = g_appCtx->rtsp_handle->hasActiveRtpSession;
+		pthread_mutex_unlock(&g_appCtx->rtsp_handle->mutex);
+		
+		// 如果RTP会话从非活跃变为活跃，清空ringbuf
+		if (currentRtpSessionState == 1 && lastRtpSessionState == 0)
+		{
+			LOG_INFO("[GetDataCallback] New RTSP client connected, clearing ringbuf to ensure real-time data\n");
+			if (ClearRingbufAllItems(g_appCtx->ringbuf) < 0)
+			{
+				LOG_ERR("Failed to clear ringbuf\n");
+				return -1;
+			}
+			justCleared = 1;
+		}
+		lastRtpSessionState = currentRtpSessionState;
+	}
+
+	// 第一步：从ringbuf读取4字节长度字段（主机字节序）
+	ret = RingBufferPop(g_appCtx->ringbuf, &frameSize, sizeof(frameSize), 100);
 	if (ret != 0)
 	{
 		// 超时或错误
 		return (ret == 1) ? 0 : -1;
 	}
 	
-	if (actualSize != sizeof(frame_size_net))
-	{
-		LOG_ERR("Failed to read frame size, got %zu bytes\n", actualSize);
-		return -1;
-	}
-	
-	// 转换网络字节序为主机字节序，得到帧长度
-	frame_size = ntohl(frame_size_net);
-	
 	// 检查帧大小是否合理
-	if (frame_size == 0 || frame_size > 10 * 1024 * 1024)
+	if ((frameSize == 0) || (frameSize > 10 * 1024 * 1024))
 	{
-		LOG_ERR("Invalid frame size: %u\n", frame_size);
+		// 如果刚清空过ringbuf，可能是残留的不完整数据，返回0等待新数据
+		if (justCleared)
+		{
+			LOG_DEBUG("[GetDataCallback] Invalid frame size after clear: %u, waiting for new data\n", frameSize);
+			// 将无效的长度字段放回ringbuf（实际上无法放回，所以直接清空ringbuf并返回0）
+			RingBufferClear(g_appCtx->ringbuf);
+			return 0;
+		}
+		LOG_ERR("Invalid frame size: %u\n", frameSize);
 		return -1;
 	}
 	
 	// 检查缓冲区是否足够
-	if (bufSize < frame_size)
+	if (bufSize < frameSize)
 	{
-		LOG_ERR("Buffer too small: need %u bytes, got %u bytes\n", frame_size, bufSize);
+		LOG_ERR("Buffer too small: need %u bytes, got %u bytes\n", frameSize, bufSize);
 		return -1;
 	}
 	
 	// 第二步：从ringbuf读取完整帧数据
-	ret = RingBufferPop(g_ringbuf, buf, frame_size, &actualSize, 100);
-	if (ret != 0 || actualSize != frame_size)
+	ret = RingBufferPop(g_appCtx->ringbuf, buf, frameSize, 100);
+	if (ret != 0)
 	{
-		LOG_ERR("Failed to read complete frame, expected %u, got %zu\n", 
-			frame_size, actualSize);
+		LOG_ERR("Failed to read complete frame, expected %u bytes\n", frameSize);
 		return (ret == 1) ? 0 : -1;
 	}
 	
 	// 打印ringbuf数据信息
-	size_t data_size = RingBufferGetSize(g_ringbuf);
-	size_t free_size = RingBufferGetFree(g_ringbuf);
+	size_t data_size = RingBufferGetUsedSize(g_appCtx->ringbuf);
+	size_t free_size = RingBufferGetFreeSize(g_appCtx->ringbuf);
 	size_t capacity = data_size + free_size;
 	double usage = capacity > 0 ? (double)data_size * 100.0 / capacity : 0.0;
 	LOG_DEBUG("[RingBuf Pop] Frame: %u bytes, DataSize: %zu bytes, FreeSize: %zu bytes, Usage: %.2f%%\n",
-		frame_size, data_size, free_size, usage);
+		frameSize, data_size, free_size, usage);
 	
 	// 返回完整帧长度
-	return (int)frame_size;
+	return (int)frameSize;
 }
 
 /**
@@ -672,18 +426,21 @@ static int GetInterfaceIP(const char *interface_name, char *ip_str)
  */
 int main(int argc, char *argv[])
 {
+	int ret = 0;
+	const char *streamFilePath = NULL;
+	size_t ringbuf_size = 2 * 1024 * 1024; // 2MB
+
+	AppContext_t ctx = {0};
 	RTSPConfig_t config;
 	RTSPStatus_t status;
-	int ret = 0;
-	const char *stream_file = NULL;
 
 	// 解析命令行参数
 	if (argc < 2)
 	{
-		LOG_ERR("Usage: %s <stream_file> [debug]\n", argv[0]);
+		LOG_ERR("Usage: %s <streamFilePath> [debug]\n", argv[0]);
 		return -1;
 	}
-	stream_file = argv[1];
+	streamFilePath = argv[1];
 
 	// 检查是否有debug参数
 	if (argc >= 3 && strcmp(argv[2], "debug") == 0)
@@ -696,20 +453,16 @@ int main(int argc, char *argv[])
 	signal(SIGINT, SignalHandler);
 	signal(SIGTERM, SignalHandler);
 
-	// 初始化码流读取功能（如果文件存在）
-	ret = InitStreamReader(stream_file, 2 * 1024 * 1024); // 2MB队列
-	if (ret < 0)
-	{
-		LOG_ERR("Failed to initialize stream reader\n");
-		return -1;
-	}
-	
+	// 设置全局上下文指针（用于回调函数）
+	g_appCtx = &ctx;
+
 	// 配置RTSP服务器
 	memset(&config, 0, sizeof(config));
 	config.rtspPort = 8554; // RTSP监听端口
 	config.rtpPort = 5000;  // RTP端口
 	config.format = RTSP_FORMAT_H264; // H.264格式
-	config.fps = 25; // 25帧/秒
+	config.fps = 30; // 30帧/秒
+	ctx.videoFps = config.fps;
 
 	LOG_INFO("RTSP Server Sample\n");
 	LOG_INFO("RTSP Port: %d\n", config.rtspPort);
@@ -717,14 +470,58 @@ int main(int argc, char *argv[])
 	LOG_INFO("Format: H.264\n");
 	LOG_INFO("FPS: %d\n", config.fps);
 
-	// 创建RTSP服务器
-	ret = RTSPCreate(&g_handle, &config, GetDataCallback);
+	// 1. 创建H264解析模块
+	ctx.streamFilePath = strdup(streamFilePath);
+	if (ctx.streamFilePath == NULL)
+	{
+		LOG_ERR("Failed to allocate memory for stream file path\n");
+		return -1;
+	}
+	ctx.h264_parser = H264ParserCreate(ctx.streamFilePath, 0, 1); // loop_enabled=1
+	if (ctx.h264_parser == NULL)
+	{
+		LOG_ERR("Failed to create H264 parser\n");
+		free(ctx.streamFilePath);
+		return -1;
+	}
+	LOG_INFO("H264 parser created\n");
+
+	// 2. 创建RingBuf模块
+	ctx.ringbuf = RingBufferCreate(ringbuf_size);
+	if (ctx.ringbuf == NULL)
+	{
+		LOG_ERR("Failed to create ring buffer\n");
+		H264ParserDestroy(ctx.h264_parser);
+		free(ctx.streamFilePath);
+		return -1;
+	}
+	LOG_INFO("Ring buffer created, size: %zu bytes\n", ringbuf_size);
+
+	// 3. 创建RTSP服务器（传入GetDataCallback）
+	ret = RTSPCreate(&ctx.rtsp_handle, &config, GetDataCallback);
 	if (ret < 0)
 	{
 		LOG_ERR("RTSPCreate failed\n");
-		CleanupStreamReader();
+		RingBufferDestroy(ctx.ringbuf);
+		H264ParserDestroy(ctx.h264_parser);
+		free(ctx.streamFilePath);
 		return -1;
 	}
+	LOG_INFO("RTSP server created\n");
+
+	// 4. 创建解析线程（从H264解析器取帧推送到ringbuf）
+	ctx.running = 1;
+	ret = pthread_create(&ctx.parseThread, NULL, ParseThread, &ctx);
+	if (ret != 0)
+	{
+		LOG_ERR("Failed to create parse thread\n");
+		RTSPDestroy(ctx.rtsp_handle);
+		RingBufferDestroy(ctx.ringbuf);
+		H264ParserDestroy(ctx.h264_parser);
+		free(ctx.streamFilePath);
+		return -1;
+	}
+	LOG_INFO("Parse thread created\n");
 
 	LOG_INFO("RTSP server started successfully\n");
 	
@@ -745,15 +542,15 @@ int main(int argc, char *argv[])
 	}
 	LOG_INFO("Press Ctrl+C to stop\n");
 
-	// 主循环：定期检查状态
+	// 5. 主循环：检查RTSP状态和ringbuf状态
 	while (1)
 	{
 		sleep(1);
 
-		// 检查状态
-		if (NULL != g_handle)
+		// 检查RTSP状态
+		if (ctx.rtsp_handle != NULL)
 		{
-			ret = RTSPGetStatus(g_handle, &status);
+			ret = RTSPGetStatus(ctx.rtsp_handle, &status);
 			if (ret == 0)
 			{
 				if (status == RTSP_STATUS_STOPPED)
@@ -767,17 +564,74 @@ int main(int argc, char *argv[])
 		{
 			break;
 		}
+
+		// 检查运行标志
+		if (!ctx.running)
+		{
+			LOG_INFO("Received shutdown signal\n");
+			break;
+		}
+
+		// 检查ringbuf状态（可选，用于监控）
+		if (ctx.ringbuf != NULL)
+		{
+			size_t data_size = RingBufferGetUsedSize(ctx.ringbuf);
+			size_t free_size = RingBufferGetFreeSize(ctx.ringbuf);
+			size_t itemCount = RingBufferGetItemCount(ctx.ringbuf);
+			LOG_INFO("[MainLoop] Ringbuf: DataSize=%zu, FreeSize=%zu, ItemCount=%zu\n", 
+				data_size, free_size, itemCount/2); // 每帧占2个item（长度+数据）
+		}
 	}
 
-	// 清理
-	if (NULL != g_handle)
+	// 6. 清理：依次销毁 RTSP、ringbuf、H264解析器
+	LOG_INFO("Cleaning up resources...\n");
+
+	// 停止线程
+	ctx.running = 0;
+	if (ctx.ringbuf != NULL)
 	{
-		RTSPDestroy(g_handle);
-		g_handle = NULL;
+		RingBufferClose(ctx.ringbuf);
 	}
 
-	// 清理码流读取功能
-	CleanupStreamReader();
+	// 等待解析线程结束
+	if (ctx.parseThread != 0)
+	{
+		pthread_join(ctx.parseThread, NULL);
+		ctx.parseThread = 0;
+	}
+
+	// 销毁RTSP
+	if (ctx.rtsp_handle != NULL)
+	{
+		RTSPDestroy(ctx.rtsp_handle);
+		ctx.rtsp_handle = NULL;
+		LOG_INFO("RTSP destroyed\n");
+	}
+
+	// 销毁ringbuf
+	if (ctx.ringbuf != NULL)
+	{
+		RingBufferDestroy(ctx.ringbuf);
+		ctx.ringbuf = NULL;
+		LOG_INFO("Ringbuf destroyed\n");
+	}
+
+	// 销毁H264解析器
+	if (ctx.h264_parser != NULL)
+	{
+		H264ParserDestroy(ctx.h264_parser);
+		ctx.h264_parser = NULL;
+		LOG_INFO("H264 parser destroyed\n");
+	}
+
+	// 释放文件路径
+	if (ctx.streamFilePath != NULL)
+	{
+		free(ctx.streamFilePath);
+		ctx.streamFilePath = NULL;
+	}
+
+	g_appCtx = NULL;
 
 	LOG_INFO("RTSP server sample exited\n");
 	return 0;

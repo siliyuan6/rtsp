@@ -26,6 +26,7 @@ typedef struct RingBuffer_s
     size_t readPos;             // 读位置
     size_t writePos;            // 写位置
     size_t validDataSize;       // 有效数据大小（字节）
+    size_t itemCount;           // 数据项个数，由用户决定
     pthread_mutex_t mutex;      // 互斥锁
     pthread_cond_t condRead;    // 读条件变量（有数据可读）
     pthread_cond_t condWrite;   // 写条件变量（有空间可写）
@@ -72,14 +73,21 @@ int RingBufferPop(RingBuffer_t* rb, void* data, size_t size, int timeoutMs);
  * @param rb 循环队列指针
  * @return 当前数据大小（字节）
  */
-size_t RingBufferGetSize(RingBuffer_t* rb);
+size_t RingBufferGetUsedSize(RingBuffer_t* rb);
 
 /**
  * @brief 获取空闲空间大小
  * @param rb 循环队列指针
  * @return 空闲空间大小（字节）
  */
-size_t RingBufferGetFree(RingBuffer_t* rb);
+size_t RingBufferGetFreeSize(RingBuffer_t* rb);
+
+/**
+ * @brief 获取当前数据项个数
+ * @param rb 循环队列指针
+ * @return 当前数据项个数
+ */
+size_t RingBufferGetItemCount(RingBuffer_t* rb);
 
 /**
  * @brief 关闭缓冲区

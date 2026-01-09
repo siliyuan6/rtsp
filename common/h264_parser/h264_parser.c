@@ -223,7 +223,8 @@ static int ReadBufferFromFile(H264Parser_t *parser)
     }
     
     parser->validDataSize += readSize;
-    LOG_INFO("[H264Parser] Read %zu bytes from file\n", readSize);
+    LOG_DEBUG("[H264Parser] Read %zu bytes from file\n", readSize);
+    
     return (int)readSize;
 }
 

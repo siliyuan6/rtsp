@@ -53,6 +53,7 @@ int RTSPCreate(RTSPHandle_t **handle, const RTSPConfig_t *config,
 	h->config = *config;
 	h->getData = getData;
 	h->isRunning = 1;
+	h->hasActiveRtpSession = 0; // 初始化为0，表示没有活跃的RTP会话
 	h->rtspFd = -1;
 	h->rtpFd = -1;
 	h->rtcpFd = -1;
@@ -115,6 +116,7 @@ int RTSPDestroy(RTSPHandle_t *handle)
 	// 停止运行标志
 	pthread_mutex_lock(&handle->mutex);
 	handle->isRunning = 0;
+	handle->hasActiveRtpSession = 0; // 停止RTP会话
 	pthread_mutex_unlock(&handle->mutex);
 
 	// 等待RTSP线程结束

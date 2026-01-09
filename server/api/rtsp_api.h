@@ -56,6 +56,7 @@ typedef struct
 	pthread_t rtspThread;  // RTSP处理线程ID
 	pthread_t rtpThread;   // RTP发送线程ID
 	int isRunning;         // 运行标志
+	int hasActiveRtpSession; // RTP会话是否活跃
 	struct sockaddr_in clientAddr;    // RTSP客户端地址和端口
 	struct sockaddr_in clientRtpAddr; // RTP客户端地址和端口
 	int (*getData)(unsigned char *buf, unsigned int bufSize); // 数据回调函数

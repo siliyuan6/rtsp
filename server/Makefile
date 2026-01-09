@@ -22,6 +22,7 @@ CORE_SRCS = $(wildcard core/*.c)
 SAMPLE_SRCS = $(wildcard sample/*.c)
 RINGBUF_SRCS = $(wildcard $(COMMON_DIR)/ringbuf/*.c)
 LOG_SRCS = $(wildcard $(COMMON_DIR)/log.c)
+H264_PARSER_SRCS = $(wildcard $(COMMON_DIR)/h264_parser/*.c)
 
 # 目标文件（在obj目录中，保持目录结构）
 API_OBJS = $(patsubst api/%.c, $(OBJ_DIR)/api/%.o, $(API_SRCS))
@@ -32,6 +33,8 @@ SAMPLE_OBJS = $(patsubst sample/%.c, $(OBJ_DIR)/sample/%.o, $(SAMPLE_SRCS))
 RINGBUF_OBJS = $(OBJ_DIR)/ringbuf/ringbuf.o
 # log 目标文件：从 ../common/log.c 转换为 obj/log/log.o
 LOG_OBJS = $(OBJ_DIR)/log/log.o
+# h264_parser 目标文件：从 ../common/h264_parser/h264_parser.c 转换为 obj/h264_parser/h264_parser.o
+H264_PARSER_OBJS = $(OBJ_DIR)/h264_parser/h264_parser.o
 
 # 库文件目标（不包括sample）
 LIB_OBJS = $(API_OBJS) $(NETWORK_OBJS) $(CORE_OBJS)
@@ -68,6 +71,7 @@ $(OBJ_DIR):
 	@mkdir -p $(addprefix $(OBJ_DIR)/, $(SRC_DIRS))
 	@mkdir -p $(OBJ_DIR)/ringbuf
 	@mkdir -p $(OBJ_DIR)/log
+	@mkdir -p $(OBJ_DIR)/h264_parser
 
 # 确保 ringbuf 目录存在
 $(OBJ_DIR)/ringbuf:
@@ -76,6 +80,10 @@ $(OBJ_DIR)/ringbuf:
 # 确保 log 目录存在
 $(OBJ_DIR)/log:
 	@mkdir -p $(OBJ_DIR)/log
+
+# 确保 h264_parser 目录存在
+$(OBJ_DIR)/h264_parser:
+	@mkdir -p $(OBJ_DIR)/h264_parser
 
 # 通用编译规则：从源文件编译到obj目录
 # 使用order-only依赖确保目录存在
@@ -105,10 +113,15 @@ $(OBJ_DIR)/log/log.o: $(COMMON_DIR)/log.c | $(OBJ_DIR)/log
 	$(ECHO_CC)
 	$(Q)$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
+# h264_parser 编译规则
+$(OBJ_DIR)/h264_parser/h264_parser.o: $(COMMON_DIR)/h264_parser/h264_parser.c | $(OBJ_DIR)/h264_parser
+	$(ECHO_CC)
+	$(Q)$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
 # 链接示例程序
-sample: $(LIB_OBJS) $(SAMPLE_OBJS) $(RINGBUF_OBJS) $(LOG_OBJS)
+sample: $(LIB_OBJS) $(SAMPLE_OBJS) $(RINGBUF_OBJS) $(LOG_OBJS) $(H264_PARSER_OBJS)
 	$(ECHO_LD)
-	$(Q)$(CC) $(LIB_OBJS) $(SAMPLE_OBJS) $(RINGBUF_OBJS) $(LOG_OBJS) -o $(TARGET) $(LDFLAGS)
+	$(Q)$(CC) $(LIB_OBJS) $(SAMPLE_OBJS) $(RINGBUF_OBJS) $(LOG_OBJS) $(H264_PARSER_OBJS) -o $(TARGET) $(LDFLAGS)
 	@echo "Build completed: $(TARGET)"
 
 # 编译静态库

@@ -38,11 +38,12 @@ RingBuffer_t* RingBufferCreate(size_t capacity)
         return NULL;
     }
 
+    rb->isEnabled = 1;
     rb->capacity = capacity;
     rb->readPos = 0;
     rb->writePos = 0;
     rb->validDataSize = 0;
-    rb->isEnabled = 1;
+    rb->itemCount = 0;
 
     if (pthread_mutex_init(&rb->mutex, NULL) != 0)
     {
@@ -149,6 +150,7 @@ int RingBufferPush(RingBuffer_t* rb, const void* data, size_t size)
         remaining -= toWrite;
         src += toWrite;
     }
+    rb->itemCount++;
 
     // 唤醒等待读取的线程
     pthread_cond_broadcast(&rb->condRead);
@@ -236,6 +238,8 @@ int RingBufferPop(RingBuffer_t* rb, void* data, size_t size, int timeoutMs)
         dst += toReadNow;
     }
 
+    rb->itemCount--;
+
     // 唤醒等待写入的线程
     pthread_cond_broadcast(&rb->condWrite);
     pthread_mutex_unlock(&rb->mutex);
@@ -246,7 +250,7 @@ int RingBufferPop(RingBuffer_t* rb, void* data, size_t size, int timeoutMs)
 /**
  * @brief 获取当前数据大小
  */
-size_t RingBufferGetSize(RingBuffer_t* rb)
+size_t RingBufferGetUsedSize(RingBuffer_t* rb)
 {
     if (NULL == rb)
     {
@@ -263,7 +267,7 @@ size_t RingBufferGetSize(RingBuffer_t* rb)
 /**
  * @brief 获取空闲空间大小
  */
-size_t RingBufferGetFree(RingBuffer_t* rb)
+size_t RingBufferGetFreeSize(RingBuffer_t* rb)
 {
     if (NULL == rb)
     {
@@ -275,6 +279,23 @@ size_t RingBufferGetFree(RingBuffer_t* rb)
     pthread_mutex_unlock(&rb->mutex);
 
     return free;
+}
+
+/** 
+ * @brief 获取数据项个数
+ */
+size_t RingBufferGetItemCount(RingBuffer_t* rb)
+{
+    if (NULL == rb)
+    {
+        return 0;
+    }
+
+    pthread_mutex_lock(&rb->mutex);
+    size_t count = rb->itemCount;
+    pthread_mutex_unlock(&rb->mutex);
+
+    return count;
 }
 
 /**

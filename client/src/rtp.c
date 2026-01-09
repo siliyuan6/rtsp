@@ -12,7 +12,6 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#define closesocket close
 #define SOCKET int
 #define INVALID_SOCKET (-1)
 #endif
@@ -62,7 +61,7 @@ static int rtp_udp_create(int port)
     if (ret != 0)
     {
         LOG_ERR("setsockopt failed\n");
-        closesocket(sock);
+        close(sock);
         return -1;
     }
 
@@ -77,7 +76,7 @@ static int rtp_udp_create(int port)
     if (ret < 0)
     {
         LOG_ERR("bind failed\n");
-        closesocket(sock);
+        close(sock);
         return -1;
     }
 
@@ -92,7 +91,7 @@ static void rtp_udp_destroy(int sock)
 {
     if (sock)
     {
-        closesocket(sock);
+        close(sock);
     }
 }
 

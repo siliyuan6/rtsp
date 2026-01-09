@@ -15,7 +15,6 @@
 #include <arpa/inet.h>
 #include <sys/prctl.h>
 #include <time.h>
-#define closesocket close
 
 #include "rtp.h"
 #include "api/rtsp_api.h"
@@ -503,6 +502,12 @@ int RTPSendData(int rtpFd, struct sockaddr_in *clientAddr,
 			}
 			return -1;
 		}
+		
+		// 对于大帧（>50个包），每10个包添加微小延时，避免UDP丢包
+		if (packetCount > 50 && (i + 1) % 10 == 0 && i < packetCount - 1)
+		{
+			usleep(200); // 200微秒，避免网络拥塞
+		}
 	}
 
 	// 释放所有包的内存
@@ -589,7 +594,7 @@ void *RTPHandleThread(void *args)
 		timestampIncrement);
 
 	// 循环发送数据
-	while (handle->isRunning)
+	while (handle->isRunning && handle->hasActiveRtpSession)
 	{
 		// 从回调函数获取数据
 		if (NULL != handle->getData)
@@ -600,20 +605,19 @@ void *RTPHandleThread(void *args)
 				// 获取NALU类型
 				naluType = GetNALUType(dataBuf, dataLen);
 				
-				// 判断是否是参数集（SPS、PPS、SEI）或IDR帧
-				// 这些NALU属于同一个访问单元，应该使用相同的时间戳
-				if (!(naluType == NALU_TYPE_PPS || 
-					  naluType == NALU_TYPE_SEI ||
-					  naluType == NALU_TYPE_IDR))
+				// 只有视频帧（IDR和NON-IDR）才增加时间戳
+				// SPS、PPS、SEI等参数集不增加时间戳，使用当前时间戳
+				// 注意：时间戳在发送前增加，这样视频帧才有正确的时间戳
+				if (naluType == NALU_TYPE_IDR || naluType == NALU_TYPE_NON_IDR)
 				{
 					timestamp += timestampIncrement;
 				}
 				
 				// 发送RTP数据
 				ret = RTPSendData(handle->rtpFd, &handle->clientRtpAddr,
-					handle->config.format, 
-					dataBuf, dataLen, 
-					&seq, &timestamp);
+								  handle->config.format, 
+								  dataBuf, dataLen, 
+								  &seq, &timestamp);
 				if (ret < 0)
 				{
 					LOG_ERR("RTPSendData failed\n");
@@ -631,9 +635,8 @@ void *RTPHandleThread(void *args)
 			LOG_ERR("getData callback is NULL\n");
 			break;
 		}
-
-		// 控制发送速率（简单延时）
-		usleep(1000000 / handle->config.fps); // 微秒
+		// 注意：帧率在 StreamReadThread 中控制，此处不再延时
+		// 避免双重延时导致速度过慢
 	}
 
 	if (NULL != dataBuf)

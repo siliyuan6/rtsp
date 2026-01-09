@@ -69,7 +69,7 @@ static int PushFrameToRingbuf(RingBuffer_t *rb, const unsigned char *frameData, 
     }
 
     LOG_DEBUG("[ParserThread] Frame pushed: size=%zu, ringbuf usage: %zu/%zu\n",
-        frameSize, RingBufferGetSize(rb), RingBufferGetSize(rb) + RingBufferGetFree(rb));
+        frameSize, RingBufferGetUsedSize(rb), RingBufferGetUsedSize(rb) + RingBufferGetFreeSize(rb));
 
     return 0;
 }
@@ -208,7 +208,7 @@ static void* WriteThread(void *arg)
     int frame_count = 0;
 
     // 循环读取帧
-    while (g_running || RingBufferGetSize(g_ringbuf) > 0)
+    while (g_running || RingBufferGetUsedSize(g_ringbuf) > 0)
     {
         // 先读取4字节的长度字段
         int result = RingBufferPop(g_ringbuf, sizeBuf, sizeof(unsigned int), 100);
