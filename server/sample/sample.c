@@ -545,7 +545,7 @@ int main(int argc, char *argv[])
 	// 5. 主循环：检查RTSP状态和ringbuf状态
 	while (1)
 	{
-		sleep(1);
+		sleep(5);
 
 		// 检查RTSP状态
 		if (ctx.rtsp_handle != NULL)
