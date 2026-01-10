@@ -213,3 +213,53 @@ int CreateRtpSocket(int port, int *rtpPortOut, int *rtcpPortOut)
 	return rtpSock;
 }
 
+/**
+ * @brief 创建RTP TCP socket并连接到客户端
+ * 
+ * @param clientAddr 客户端地址和端口
+ * @return 成功返回TCP socket文件描述符，失败返回-1
+ */
+int CreateRtpTcpSocket(const struct sockaddr_in *clientAddr)
+{
+	int ret = 0;
+	int sock = -1;
+
+	if (NULL == clientAddr)
+	{
+		LOG_ERR("Invalid client address\n");
+		return -1;
+	}
+
+	// 创建TCP socket
+	sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if ((SOCKET)sock == INVALID_SOCKET)
+	{
+		LOG_ERR("TCP socket creation failed\n");
+		return -1;
+	}
+
+	// 设置套接字选项
+	int reuse = 1;
+	ret = setsockopt(sock, SOL_SOCKET, SO_REUSEADDR,
+		(char*)&reuse, sizeof(reuse));
+	if (ret != 0)
+	{
+		LOG_WARN("setsockopt SO_REUSEADDR failed, continuing anyway\n");
+	}
+
+	// 连接到客户端
+	ret = connect(sock, (struct sockaddr*)clientAddr, sizeof(*clientAddr));
+	if (ret < 0)
+	{
+		LOG_ERR("TCP connect failed to %s:%d\n",
+			inet_ntoa(clientAddr->sin_addr), ntohs(clientAddr->sin_port));
+		close(sock);
+		return -1;
+	}
+
+	LOG_INFO("RTP TCP socket connected to %s:%d\n",
+		inet_ntoa(clientAddr->sin_addr), ntohs(clientAddr->sin_port));
+
+	return sock;
+}
+

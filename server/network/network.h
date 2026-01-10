@@ -26,5 +26,13 @@ int CreateRtspSocket(int port);
  */
 int CreateRtpSocket(int port, int *rtpPortOut, int *rtcpPortOut);
 
+/**
+ * @brief 创建RTP TCP socket并连接到客户端
+ * 
+ * @param clientAddr 客户端地址和端口
+ * @return 成功返回TCP socket文件描述符，失败返回-1
+ */
+int CreateRtpTcpSocket(const struct sockaddr_in *clientAddr);
+
 #endif /* NETWORK_H */
 

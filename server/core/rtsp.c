@@ -20,6 +20,7 @@
 
 #include "rtsp.h"
 #include "rtp.h"
+#include "rtcp.h"
 #include "api/rtsp_api.h"
 #include "network/network.h"
 #include "common/log.h"
@@ -302,45 +303,279 @@ int RTSPHandleDescribe(int clientFd, const char *request,
 }
 
 /**
- * @brief 解析Transport头，获取客户端RTP端口
+ * @brief Transport解析结果结构体
+ */
+typedef struct
+{
+	RTSPTransportMode_t mode;  // 传输模式
+	int clientRtpPort;         // 客户端RTP端口 (UDP或TCP separate)
+	int clientRtcpPort;        // 客户端RTCP端口
+	unsigned char rtpChannel;  // RTP通道号 (interleaved模式)
+	unsigned char rtcpChannel; // RTCP通道号 (interleaved模式)
+} TransportParseResult_t;
+
+/**
+ * @brief 处理Interleaved数据包（RTCP数据）
+ * 
+ * Interleaved格式：$ + channel(1字节) + length(2字节, big-endian) + data(length字节)
+ * 
+ * @param clientFd 客户端socket文件描述符
+ * @param handle RTSP句柄指针
+ * @param firstByte 第一个字节（应该是'$'，0x24）
+ * @param recvBuf 接收缓冲区（已包含firstByte）
+ * @param recvLen 已接收的数据长度
+ * @return 成功返回0，失败返回-1，需要继续接收返回1
+ */
+static int HandleInterleavedData(int clientFd, RTSPHandle_t *handle,
+	unsigned char firstByte, unsigned char *recvBuf, int recvBufSize, int recvLen)
+{
+	unsigned char channel;
+	unsigned short dataLength;
+	int totalNeeded;
+	int remaining;
+	int received;
+	RTSPTransportMode_t transportMode;
+	
+	if (firstByte != 0x24) // '$'
+	{
+		return -1; // 不是interleaved数据
+	}
+	
+	// 检查是否在TCP interleaved模式下
+	pthread_mutex_lock(&handle->mutex);
+	transportMode = handle->transportMode;
+	pthread_mutex_unlock(&handle->mutex);
+	
+	if (transportMode != RTSP_TRANSPORT_TCP_INTERLEAVED)
+	{
+		// 不在interleaved模式下，不应该收到interleaved数据
+		LOG_WARN("Received interleaved data but not in TCP interleaved mode (mode: %d)\n",
+			transportMode);
+		return -1;
+	}
+	
+	// 至少需要4字节：$ + channel + length(2字节)
+	if (recvLen < 4)
+	{
+		// 需要继续接收
+		return 1;
+	}
+	
+	// 解析channel和length
+	channel = recvBuf[1];
+	dataLength = (recvBuf[2] << 8) | recvBuf[3];
+	
+	// 计算总共需要的字节数
+	totalNeeded = 4 + dataLength;
+	
+	// 检查数据包是否太大（超过缓冲区大小）
+	if (totalNeeded > recvBufSize)
+	{
+		LOG_WARN("Interleaved packet too large: %d bytes (max: %d), channel: %d\n",
+			totalNeeded, recvBufSize, channel);
+		// 跳过这个数据包：读取并丢弃剩余数据
+		remaining = totalNeeded - recvLen;
+		if (remaining > 0)
+		{
+			unsigned char discardBuf[4096];
+			while (remaining > 0)
+			{
+				int toRead = (remaining > (int)sizeof(discardBuf)) ? (int)sizeof(discardBuf) : remaining;
+				received = recv(clientFd, discardBuf, toRead, 0);
+				if (received <= 0)
+				{
+					break;
+				}
+				remaining -= received;
+			}
+		}
+		return -1;
+	}
+	
+	if (recvLen < totalNeeded)
+	{
+		// 需要继续接收剩余数据
+		remaining = totalNeeded - recvLen;
+		if (remaining > recvBufSize - recvLen)
+		{
+			LOG_WARN("Interleaved packet would overflow buffer\n");
+			return -1;
+		}
+		received = recv(clientFd, recvBuf + recvLen, remaining, 0);
+		if (received <= 0)
+		{
+			if (received < 0 && (errno == ECONNRESET || errno == EPIPE || errno == ECONNABORTED))
+			{
+				LOG_INFO("Client disconnected during interleaved data receive\n");
+			}
+			else
+			{
+				LOG_ERR("recv interleaved data failed, errno: %d\n", errno);
+			}
+			return -1;
+		}
+		recvLen += received;
+		
+		// 如果还是不够，说明数据包太大，跳过
+		if (recvLen < totalNeeded)
+		{
+			LOG_WARN("Interleaved packet incomplete, channel: %d, expected: %d, received: %d\n",
+				channel, totalNeeded, recvLen);
+			return -1;
+		}
+	}
+	
+	// 检查通道号
+	pthread_mutex_lock(&handle->mutex);
+	unsigned char rtpChannel = handle->rtpChannel;
+	unsigned char rtcpChannel = handle->rtcpChannel;
+	pthread_mutex_unlock(&handle->mutex);
+	
+	if (channel == rtcpChannel)
+	{
+		// RTCP数据包
+		LOG_DEBUG("Received RTCP packet via interleaved, channel: %d, length: %d\n",
+			channel, dataLength);
+		
+		// 解析RTCP包（跳过interleaved头，直接解析RTCP数据部分）
+		// recvBuf的前4字节是interleaved头，RTCP数据从第5字节开始
+		if (recvLen >= 4)
+		{
+			const unsigned char *rtcpData = recvBuf + 4;
+			int rtcpDataLen = recvLen - 4;
+			
+			RTCPStats_t stats;
+			int packetType = RTCPParsePacket(rtcpData, rtcpDataLen, &stats);
+			
+			if (packetType == RTCP_PT_RR)
+			{
+				// 成功解析RR包，更新统计信息并调用回调
+				pthread_mutex_lock(&handle->mutex);
+				handle->rtcpStats = stats;
+				RTCPStatsCallback_t callback = handle->rtcpStatsCallback;
+				void *userData = handle->rtcpStatsUserData;
+				pthread_mutex_unlock(&handle->mutex);
+				
+				// 调用回调函数（在锁外调用，避免死锁）
+				if (NULL != callback)
+				{
+					callback(&stats, userData);
+				}
+				
+				LOG_DEBUG("RTCP RR parsed: SSRC=0x%08X, fraction_lost=%u, cumulative_lost=%d, "
+					"ext_seq=%u, jitter=%u\n",
+					stats.ssrc, stats.fractionLost, stats.cumulativePacketsLost,
+					stats.extendedHighestSeq, stats.jitter);
+			}
+			else if (packetType >= 0)
+			{
+				// 其他类型的RTCP包（SR/SDES/BYE），已记录日志
+				LOG_DEBUG("RTCP packet type %d received (not processed)\n", packetType);
+			}
+			else
+			{
+				// 解析失败
+				LOG_DEBUG("Failed to parse RTCP packet\n");
+			}
+		}
+	}
+	else if (channel == rtpChannel)
+	{
+		// 这不应该发生，服务器只发送RTP，不接收
+		LOG_WARN("Received RTP packet via interleaved (unexpected), channel: %d, length: %d\n",
+			channel, dataLength);
+	}
+	else
+	{
+		LOG_WARN("Unknown interleaved channel: %d, expected RTP: %d, RTCP: %d\n",
+			channel, rtpChannel, rtcpChannel);
+	}
+	
+	return 0; // 成功处理
+}
+
+/**
+ * @brief 解析Transport头，获取传输模式和参数
  * 
  * @param request 请求内容
- * @param clientRtpPort 输出客户端RTP端口
- * @param clientRtcpPort 输出客户端RTCP端口
+ * @param result 输出解析结果
  * @return 成功返回0，失败返回-1
  */
-static int ParseTransport(const char *request, int *clientRtpPort,
-	int *clientRtcpPort)
+static int ParseTransport(const char *request, TransportParseResult_t *result)
 {
-	char *transportLine = strstr(request, "Transport:");
+	char *transportLine = NULL;
+	int isTcp = 0;
+	int hasInterleaved = 0;
+
+	if (NULL == request || NULL == result)
+	{
+		return -1;
+	}
+
+	memset(result, 0, sizeof(TransportParseResult_t));
+
+	transportLine = strstr(request, "Transport:");
 	if (NULL == transportLine)
 	{
 		return -1;
 	}
 
-	// 查找client_port
-	char *portStr = strstr(transportLine, "client_port=");
-	if (NULL == portStr)
+	// 检测是否为TCP模式
+	if (strstr(transportLine, "RTP/AVP/TCP") != NULL)
 	{
+		isTcp = 1;
+	}
+	else if (strstr(transportLine, "RTP/AVP") != NULL)
+	{
+		isTcp = 0;
+	}
+	else
+	{
+		LOG_ERR("Unsupported transport protocol\n");
 		return -1;
 	}
 
-	int rtpPort = 0;
-	int rtcpPort = 0;
-	if (sscanf(portStr, "client_port=%d-%d", &rtpPort, &rtcpPort) == 2)
+	// 检测interleaved参数 (TCP interleaved模式)
+	char *interleavedStr = strstr(transportLine, "interleaved=");
+	if (interleavedStr != NULL)
 	{
-		if (NULL != clientRtpPort)
+		hasInterleaved = 1;
+		int rtpChan = 0, rtcpChan = 1;
+		if (sscanf(interleavedStr, "interleaved=%d-%d", &rtpChan, &rtcpChan) >= 1)
 		{
-			*clientRtpPort = rtpPort;
+			result->rtpChannel = (unsigned char)rtpChan;
+			result->rtcpChannel = (unsigned char)rtcpChan;
 		}
-		if (NULL != clientRtcpPort)
-		{
-			*clientRtcpPort = rtcpPort;
-		}
-		return 0;
 	}
 
-	return -1;
+	// 根据模式解析参数
+	if (isTcp && hasInterleaved)
+	{
+		// TCP Interleaved模式
+		result->mode = RTSP_TRANSPORT_TCP_INTERLEAVED;
+		return 0;
+	}
+	else
+	{
+		// UDP模式，需要client_port
+		char *portStr = strstr(transportLine, "client_port=");
+		if (NULL == portStr)
+		{
+			LOG_ERR("UDP mode requires client_port\n");
+			return -1;
+		}
+
+		int rtpPort = 0;
+		int rtcpPort = 0;
+		if (sscanf(portStr, "client_port=%d-%d", &rtpPort, &rtcpPort) == 2)
+		{
+			result->mode = RTSP_TRANSPORT_UDP;
+			result->clientRtpPort = rtpPort;
+			result->clientRtcpPort = rtcpPort;
+			return 0;
+		}
+		return -1;
+	}
 }
 
 /**
@@ -351,16 +586,14 @@ static int ParseTransport(const char *request, int *clientRtpPort,
  * @param handle RTSP句柄指针
  * @return 成功返回0，失败返回-1
  */
-int RTSPHandleSetup(int clientFd, const char *request,
-	RTSPHandle_t *handle)
+int RTSPHandleSetup(int clientFd, const char *request, RTSPHandle_t *handle)
 {
 	int cseq = 0;
-	int clientRtpPort = 0;
-	int clientRtcpPort = 0;
-	int serverRtpPort = 0;
-	int serverRtcpPort = 0;
-	int rtpFd = -1;
-	char headers[256];
+	TransportParseResult_t transportResult;
+		int serverRtpPort = 0;
+		int serverRtcpPort = 0;
+		int rtpFd = -1;
+		char headers[512];
 
 	if (clientFd < 0 || NULL == request || NULL == handle)
 	{
@@ -375,31 +608,16 @@ int RTSPHandleSetup(int clientFd, const char *request,
 	}
 
 	// 解析Transport头
-	if (ParseTransport(request, &clientRtpPort, &clientRtcpPort) < 0)
+	if (ParseTransport(request, &transportResult) < 0)
 	{
 		LOG_ERR("ParseTransport failed\n");
 		return SendRTSPResponse(clientFd, 400, "Bad Request",
 			NULL, NULL);
 	}
 
-	// 创建RTP socket
-	rtpFd = CreateRtpSocket(handle->config.rtpPort, &serverRtpPort,
-		&serverRtcpPort);
-	if (rtpFd < 0)
-	{
-		LOG_ERR("CreateRtpSocket failed\n");
-		return SendRTSPResponse(clientFd, 500, "Internal Server Error",
-			NULL, NULL);
-	}
-
 	// 生成唯一的Session ID（使用时间戳+随机数）
 	// 如果还没有Session ID，生成一个新的
 	pthread_mutex_lock(&handle->mutex);
-	handle->rtpFd = rtpFd;
-	handle->rtcpFd = -1; // RTCP暂未使用
-	// 设置RTP客户端地址（UDP），IP地址与RTSP相同，端口使用客户端RTP端口
-	handle->clientRtpAddr = handle->clientAddr;
-	handle->clientRtpAddr.sin_port = htons(clientRtpPort);
 	if (handle->sessionId == 0)
 	{
 		// 使用时间戳的低32位 + 简单的随机数生成Session ID
@@ -413,16 +631,70 @@ int RTSPHandleSetup(int clientFd, const char *request,
 		}
 	}
 	unsigned int sessionId = handle->sessionId;
+	handle->transportMode = transportResult.mode;
 	pthread_mutex_unlock(&handle->mutex);
 
-	// 构建Transport响应头
-	snprintf(headers, sizeof(headers),
-		"CSeq: %d\r\n"
-		"Transport: RTP/AVP;unicast;client_port=%d-%d;"
-		"server_port=%d-%d\r\n"
-		"Session: %u\r\n",
-		cseq, clientRtpPort, clientRtcpPort,
-		serverRtpPort, serverRtcpPort, sessionId);
+	// 根据传输模式处理
+	if (transportResult.mode == RTSP_TRANSPORT_UDP)
+	{
+		// UDP模式
+		rtpFd = CreateRtpSocket(handle->config.rtpPort, &serverRtpPort,
+			&serverRtcpPort);
+		if (rtpFd < 0)
+		{
+			LOG_ERR("CreateRtpSocket failed\n");
+			return SendRTSPResponse(clientFd, 500, "Internal Server Error",
+				NULL, NULL);
+		}
+
+		pthread_mutex_lock(&handle->mutex);
+		handle->rtpFd = rtpFd;
+		handle->rtcpFd = -1; // RTCP暂未使用
+		handle->rtspClientFd = -1;
+		// 设置RTP客户端地址（UDP），IP地址与RTSP相同，端口使用客户端RTP端口
+		handle->clientRtpAddr = handle->clientAddr;
+		handle->clientRtpAddr.sin_port = htons(transportResult.clientRtpPort);
+		pthread_mutex_unlock(&handle->mutex);
+
+		// 构建Transport响应头
+		snprintf(headers, sizeof(headers),
+			"CSeq: %d\r\n"
+			"Transport: RTP/AVP;unicast;client_port=%d-%d;"
+			"server_port=%d-%d\r\n"
+			"Session: %u\r\n",
+			cseq, transportResult.clientRtpPort, transportResult.clientRtcpPort,
+			serverRtpPort, serverRtcpPort, sessionId);
+
+		LOG_WARN("SETUP: UDP mode, RTP port: %d, RTCP port: %d\n",
+			serverRtpPort, serverRtcpPort);
+	}
+	else if (transportResult.mode == RTSP_TRANSPORT_TCP_INTERLEAVED)
+	{
+		// TCP Interleaved模式 - 复用RTSP连接
+		pthread_mutex_lock(&handle->mutex);
+		handle->rtpFd = -1;
+		handle->rtcpFd = -1;
+		handle->rtspClientFd = clientFd; // 保存RTSP客户端socket
+		handle->rtpChannel = transportResult.rtpChannel;
+		handle->rtcpChannel = transportResult.rtcpChannel;
+		pthread_mutex_unlock(&handle->mutex);
+
+		// 构建Transport响应头
+		snprintf(headers, sizeof(headers),
+			"CSeq: %d\r\n"
+			"Transport: RTP/AVP/TCP;unicast;interleaved=%d-%d\r\n"
+			"Session: %u\r\n",
+			cseq, transportResult.rtpChannel, transportResult.rtcpChannel,
+			sessionId);
+
+		LOG_WARN("SETUP: TCP Interleaved mode, RTP channel: %d, RTCP channel: %d\n",
+			transportResult.rtpChannel, transportResult.rtcpChannel);
+	}
+	else
+	{
+		LOG_ERR("Unsupported transport mode: %d\n", transportResult.mode);
+		return SendRTSPResponse(clientFd, 400, "Bad Request", NULL, NULL);
+	}
 
 	return SendRTSPResponse(clientFd, 200, "OK", headers, NULL);
 }
@@ -535,11 +807,29 @@ int RTSPHandleTeardown(int clientFd, const char *request, RTSPHandle_t *handle)
 		cseq = 5;
 	}
 
-	// 获取Session ID
+	// 获取Session ID并清理资源
 	pthread_mutex_lock(&handle->mutex);
 	sessionId = handle->sessionId;
+	
+	// 重置传输模式相关字段，让RTP线程知道要退出
+	handle->rtspClientFd = -1;
+	handle->transportMode = RTSP_TRANSPORT_INVALID;
+	
 	// TEARDOWN后清除Session ID
 	handle->sessionId = 0;
+	pthread_mutex_unlock(&handle->mutex);
+	
+	// 先停止RTP线程（会等待线程退出），再清理socket
+	// 避免线程在使用socket时被关闭
+	StopRtpThread(handle);
+	
+	// 清理RTP socket（如果存在，UDP或TCP Separate模式）
+	pthread_mutex_lock(&handle->mutex);
+	if (handle->rtpFd >= 0)
+	{
+		close(handle->rtpFd);
+		handle->rtpFd = -1;
+	}
 	pthread_mutex_unlock(&handle->mutex);
 	
 	// 如果Session ID为0，使用默认值（兼容性处理）
@@ -626,13 +916,13 @@ void *RTSPHandleThread(void *args)
 		int selectRet = 0;
 		
 		FD_ZERO(&readfds);
-		FD_SET(handle->rtspFd, &readfds);
+		FD_SET(handle->rtspListenFd, &readfds);
 		
 		// 设置超时时间（100ms），以便定期检查isRunning
 		timeout.tv_sec = 0;
 		timeout.tv_usec = 100000; // 100ms
 		
-		selectRet = select(handle->rtspFd + 1, &readfds, NULL, NULL, &timeout);
+		selectRet = select(handle->rtspListenFd + 1, &readfds, NULL, NULL, &timeout);
 		
 		// 检查是否应该退出
 		if (!handle->isRunning)
@@ -641,7 +931,7 @@ void *RTSPHandleThread(void *args)
 		}
 		
 		// 如果没有新连接，继续循环
-		if (selectRet <= 0 || !FD_ISSET(handle->rtspFd, &readfds))
+		if (selectRet <= 0 || !FD_ISSET(handle->rtspListenFd, &readfds))
 		{
 			continue;
 		}
@@ -649,7 +939,7 @@ void *RTSPHandleThread(void *args)
 		// 接受客户端连接
 		struct sockaddr_in clientAddr;
 		socklen_t clientAddrLen = sizeof(clientAddr);
-		clientFd = accept(handle->rtspFd, (struct sockaddr*)&clientAddr, &clientAddrLen);
+		clientFd = accept(handle->rtspListenFd, (struct sockaddr*)&clientAddr, &clientAddrLen);
 		if (clientFd < 0)
 		{
 			if (handle->isRunning)
@@ -666,26 +956,70 @@ void *RTSPHandleThread(void *args)
 		// 内层循环：处理当前客户端的RTSP请求
 		while (handle->isRunning)
 		{
-			// 接收请求
+			// 接收请求（先接收至少1字节，检查是否是interleaved数据）
 			recvLen = recv(clientFd, requestBuf, sizeof(requestBuf) - 1, 0);
 			if (recvLen <= 0)
 			{
 				if (recvLen < 0)
 				{
-					LOG_ERR("recv failed\n");
+					// 检查是否是正常的连接关闭错误
+					// ECONNRESET: 连接被对端重置（客户端关闭）
+					// EPIPE: 管道破裂（连接已关闭）
+					// 这些在客户端关闭时是正常情况
+					if (errno == ECONNRESET || errno == EPIPE || errno == ECONNABORTED)
+					{
+						LOG_INFO("Client disconnected (connection reset)\n");
+					}
+					else
+					{
+						LOG_ERR("recv failed, errno: %d (%s)\n", errno, strerror(errno));
+					}
 				}
 				else
 				{
-					LOG_INFO("Client disconnected\n");
+					LOG_INFO("Client disconnected (graceful close)\n");
 				}
-				// 停止RTP线程
+				// 先设置标志让RTP线程退出，等待线程退出后再清理socket
+				// 避免线程在使用socket时被关闭
+				pthread_mutex_lock(&handle->mutex);
+				handle->rtspClientFd = -1;
+				handle->transportMode = RTSP_TRANSPORT_INVALID;
+				pthread_mutex_unlock(&handle->mutex);
+				
+				// 停止RTP线程（会等待线程退出）
 				StopRtpThread(handle);
+				
+				// 清理RTP socket（如果存在，UDP或TCP Separate模式）
+				pthread_mutex_lock(&handle->mutex);
+				if (handle->rtpFd >= 0)
+				{
+					close(handle->rtpFd);
+					handle->rtpFd = -1;
+				}
+				pthread_mutex_unlock(&handle->mutex);
+				
 				// 客户端断开，关闭连接并跳出内层循环，等待新连接
 				close(clientFd);
 				clientFd = -1;
 				break;
 			}
 
+			// 检查是否是interleaved数据包（以'$'开头）
+			if (recvLen > 0 && requestBuf[0] == 0x24) // '$'
+			{
+				// 这是interleaved数据包（通常是RTCP数据）
+				int interleavedRet = HandleInterleavedData(clientFd, handle,
+					(unsigned char)requestBuf[0], (unsigned char *)requestBuf, sizeof(requestBuf), recvLen);
+				if (interleavedRet < 0)
+				{
+					// 处理失败，可能是连接关闭或数据错误
+					// 继续循环，等待下一个数据包
+				}
+				// 成功处理或需要继续接收，继续循环
+				continue;
+			}
+
+			// 不是interleaved数据，按RTSP请求处理
 			requestBuf[recvLen] = '\0';
 			LOG_DEBUG(">>>>>>>>>>> Received RTSP request:\n%s\n", requestBuf);
 
@@ -714,8 +1048,30 @@ void *RTSPHandleThread(void *args)
 			{
 				if (RTSPHandlePlay(clientFd, requestBuf, handle) == 0)
 				{
-					// 检查RTP socket是否已创建
-					if (handle->rtpFd >= 0)
+					// 检查传输模式和相关socket是否已创建
+					pthread_mutex_lock(&handle->mutex);
+					RTSPTransportMode_t transportMode = handle->transportMode;
+					int rtpFd = handle->rtpFd;
+					int rtspClientFd = handle->rtspClientFd;
+					pthread_mutex_unlock(&handle->mutex);
+					
+					// 根据传输模式检查对应的socket
+					int socketReady = 0;
+					if (transportMode == RTSP_TRANSPORT_UDP)
+					{
+						socketReady = (rtpFd >= 0);
+					}
+					else if (transportMode == RTSP_TRANSPORT_TCP_INTERLEAVED)
+					{
+						socketReady = (rtspClientFd >= 0);
+					}
+					else
+					{
+						LOG_ERR("Invalid transport mode: %d\n", transportMode);
+						socketReady = 0;
+					}
+					
+					if (socketReady)
 					{
 						// 如果RTP线程已存在，先停止它
 						StopRtpThread(handle);
@@ -737,24 +1093,24 @@ void *RTSPHandleThread(void *args)
 						}
 						else
 						{
-							LOG_INFO("RTP thread created\n");
+							LOG_INFO("RTP thread created, transport mode: %d\n", transportMode);
 						}
 					}
 					else
 					{
-						LOG_ERR("RTP socket not created yet\n");
+						LOG_ERR("RTP socket not created yet, transport mode: %d\n", transportMode);
 					}
 				}
 			}
 			else if (strcmp(method, "TEARDOWN") == 0)
 			{
-					RTSPHandleTeardown(clientFd, requestBuf, handle);
-					// 停止RTP线程
-					StopRtpThread(handle);
-					// TEARDOWN后关闭当前连接，但继续监听新连接
-					close(clientFd);
-					clientFd = -1;
-					break; // 跳出内层循环，等待新连接
+				RTSPHandleTeardown(clientFd, requestBuf, handle);
+				// 停止RTP线程
+				StopRtpThread(handle);
+				// TEARDOWN后关闭当前连接，但继续监听新连接
+				close(clientFd);
+				clientFd = -1;
+				break; // 跳出内层循环，等待新连接
 			}
 			else
 			{
@@ -769,6 +1125,9 @@ void *RTSPHandleThread(void *args)
 			close(clientFd);
 			clientFd = -1;
 		}
+		
+		// 确保清理所有资源，准备接受下一个连接
+		LOG_INFO("Client session ended, ready for next connection\n");
 	} // 外层循环结束
 
 	// 确保关闭客户端连接

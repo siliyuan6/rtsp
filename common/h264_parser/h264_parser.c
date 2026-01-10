@@ -333,7 +333,7 @@ int H264ParserNextFrame(H264Parser_t *parser, H264Frame_t *frame)
     }
 
     // 步骤1: 找到第一个起始码
-    LOG_DEBUG("[H264Parser] readPos=%zu, validDataSize=%zu\n", parser->readPos, parser->validDataSize);
+    // LOG_DEBUG("[H264Parser] readPos=%zu, validDataSize=%zu\n", parser->readPos, parser->validDataSize);
     int firstFrameStartCodeLen = 0;
     int firstFramePos = FindStartCode(parser->buffer, // 数据缓冲区地址
                                      parser->validDataSize, // 有效数据大小
@@ -506,4 +506,435 @@ int H264ParserNextFrame(H264Parser_t *parser, H264Frame_t *frame)
     }
 
     return 0;
+}
+
+/**
+ * @brief 获取H.264起始码长度
+ * 
+ * @param data 数据缓冲区
+ * @param len 数据长度
+ * @return 起始码长度（3或4），如果没有起始码返回0
+ */
+int H264GetStartCodeLen(const unsigned char *data, int len)
+{
+	if (len >= 4 && data[0] == 0 && data[1] == 0 &&
+		data[2] == 0 && data[3] == 1)
+	{
+		return 4; // 4字节起始码 0x00000001
+	}
+	else if (len >= 3 && data[0] == 0 && data[1] == 0 &&
+		data[2] == 1)
+	{
+		return 3; // 3字节起始码 0x000001
+	}
+	return 0; // 没有起始码
+}
+
+/**
+ * @brief 获取NALU类型
+ * 
+ * @param data H.264数据（包含起始码）
+ * @param len 数据长度
+ * @return NALU类型，失败返回-1
+ */
+int H264GetNALUType(const unsigned char *data, int len)
+{
+	int startCodeLen = H264GetStartCodeLen(data, len);
+	if (startCodeLen <= 0 || startCodeLen >= len)
+	{
+		return -1;
+	}
+	
+	// NALU类型在起始码后的第一个字节的低5位
+	return data[startCodeLen] & 0x1F;
+}
+
+/**
+ * @brief 解析exp-Golomb编码（按位读取）
+ * 
+ * @param data 数据缓冲区
+ * @param len 数据长度（字节数）
+ * @param bitOffset 当前位偏移量（输入输出参数，从0开始）
+ * @return 解码后的值，失败返回-1
+ */
+static int ReadExpGolomb(const unsigned char *data, int len, int *bitOffset)
+{
+	if (NULL == data || len <= 0 || NULL == bitOffset)
+	{
+		return -1;
+	}
+	
+	int leadingZeros = 0;
+	int bitPos = *bitOffset;
+	
+	// 计算前导零的个数
+	while (bitPos < len * 8)
+	{
+		int bytePos = bitPos / 8;
+		int bitInByte = bitPos % 8;
+		
+		if (bytePos >= len)
+		{
+			return -1; // 数据不足
+		}
+		
+		unsigned char byte = data[bytePos];
+		int bit = (byte >> (7 - bitInByte)) & 0x01;
+		
+		if (bit == 1)
+		{
+			break; // 找到第一个1
+		}
+		
+		leadingZeros++;
+		bitPos++;
+	}
+	
+	if (bitPos >= len * 8)
+	{
+		return -1; // 数据不足
+	}
+	
+	// 读取leadingZeros+1位，计算值
+	int value = 1 << leadingZeros;
+	bitPos++; // 跳过第一个1
+	
+	for (int i = 0; i < leadingZeros; i++)
+	{
+		if (bitPos >= len * 8)
+		{
+			return -1; // 数据不足
+		}
+		
+		int bytePos = bitPos / 8;
+		int bitInByte = bitPos % 8;
+		unsigned char byte = data[bytePos];
+		int bit = (byte >> (7 - bitInByte)) & 0x01;
+		
+		value |= (bit << (leadingZeros - 1 - i));
+		bitPos++;
+	}
+	
+	*bitOffset = bitPos;
+	return value - 1; // exp-Golomb编码的值需要减1
+}
+
+/**
+ * @brief 获取slice类型（I/P/B）
+ * 
+ * @param data NALU数据（包含起始码）
+ * @param len 数据长度
+ * @return 'I'表示I slice，'P'表示P slice，'B'表示B slice，失败返回-1
+ */
+int H264GetSliceType(const unsigned char *data, int len)
+{
+	int startCodeLen = H264GetStartCodeLen(data, len);
+	if (startCodeLen <= 0 || startCodeLen >= len)
+	{
+		return -1;
+	}
+	
+	// NALU头在起始码后
+	int naluHeaderPos = startCodeLen;
+	if (naluHeaderPos >= len)
+	{
+		return -1;
+	}
+	
+	unsigned char naluHeader = data[naluHeaderPos];
+	int naluType = naluHeader & 0x1F;
+	
+	// IDR帧的NALU type是5，直接返回I
+	if (naluType == H264_NALU_TYPE_IDR)
+	{
+		return 'I';
+	}
+	
+	// 只有NON_IDR帧（type=1）需要解析slice header
+	if (naluType != H264_NALU_TYPE_NON_IDR)
+	{
+		return -1;
+	}
+	
+	// slice header从NALU payload开始（跳过NALU头1字节）
+	int sliceHeaderStart = naluHeaderPos + 1;
+	if (sliceHeaderStart >= len)
+	{
+		return -1;
+	}
+	
+	// 解析slice header
+	// 需要跳过：first_mb_in_slice (ue(v))
+	// 然后读取：slice_type (ue(v))
+	// 注意：exp-Golomb是按位编码的，需要按位读取
+	int bitOffset = sliceHeaderStart * 8; // 转换为位偏移量
+	
+	// 跳过first_mb_in_slice (exp-Golomb编码)
+	int firstMb = ReadExpGolomb(data, len, &bitOffset);
+	if (firstMb < 0)
+	{
+		// 解析失败，默认当作P帧处理
+		LOG_DEBUG("[H264GetSliceType] Failed to parse first_mb_in_slice, defaulting to P frame\n");
+		return 'P';
+	}
+	
+	// 读取slice_type (exp-Golomb编码)
+	int sliceType = ReadExpGolomb(data, len, &bitOffset);
+	if (sliceType < 0)
+	{
+		// 解析失败，默认当作P帧处理
+		LOG_DEBUG("[H264GetSliceType] Failed to parse slice_type, defaulting to P frame\n");
+		return 'P';
+	}
+	
+	// slice_type值映射：
+	// 0, 3, 5, 8: I slice
+	// 1, 6: P slice
+	// 2, 4, 7, 9: B slice
+	if (sliceType == 0 || sliceType == 3 || sliceType == 5 || sliceType == 8)
+	{
+		return 'I';
+	}
+	else if (sliceType == 1 || sliceType == 6)
+	{
+		return 'P';
+	}
+	else if (sliceType == 2 || sliceType == 4 || sliceType == 7 || sliceType == 9)
+	{
+		return 'B';
+	}
+	
+	// 未知的slice_type，默认当作P帧
+	LOG_DEBUG("[H264GetSliceType] Unknown slice_type: %d, defaulting to P frame\n", sliceType);
+	return 'P';
+}
+
+/**
+ * @brief H.264帧分类器内部结构体
+ */
+struct H264FrameClassifier_s {
+	unsigned char *spsBuf;          // SPS缓存缓冲区
+	unsigned char *ppsBuf;          // PPS缓存缓冲区
+	unsigned char *seiBuf;          // SEI缓存缓冲区
+	unsigned char *combinedFrameBuf; // 组合帧缓冲区
+	int spsLen;                     // SPS长度
+	int ppsLen;                     // PPS长度
+	int seiLen;                     // SEI长度
+	int hasSps;                     // 是否有SPS
+	int hasPps;                     // 是否有PPS
+	int hasSei;                     // 是否有SEI
+	size_t cacheBufSize;            // 缓存缓冲区大小
+	size_t combinedBufSize;         // 组合缓冲区大小
+};
+
+#define DEFAULT_CACHE_BUF_SIZE (2 * 1024 * 1024)  // 默认2MB
+#define DEFAULT_COMBINED_BUF_SIZE (4 * 1024 * 1024) // 默认4MB
+
+H264FrameClassifier_t* H264FrameClassifierCreate(size_t combinedFrameBufSize)
+{
+	H264FrameClassifier_t *classifier = (H264FrameClassifier_t *)malloc(sizeof(H264FrameClassifier_t));
+	if (classifier == NULL)
+	{
+		LOG_ERR("[H264FrameClassifier] Failed to allocate classifier structure\n");
+		return NULL;
+	}
+	memset(classifier, 0, sizeof(H264FrameClassifier_t));
+	
+	// 设置缓冲区大小
+	classifier->cacheBufSize = DEFAULT_CACHE_BUF_SIZE;
+	if (combinedFrameBufSize == 0)
+	{
+		classifier->combinedBufSize = DEFAULT_COMBINED_BUF_SIZE;
+	}
+	else
+	{
+		classifier->combinedBufSize = combinedFrameBufSize;
+	}
+	
+	// 分配缓存缓冲区
+	classifier->spsBuf = (unsigned char *)malloc(classifier->cacheBufSize);
+	classifier->ppsBuf = (unsigned char *)malloc(classifier->cacheBufSize);
+	classifier->seiBuf = (unsigned char *)malloc(classifier->cacheBufSize);
+	classifier->combinedFrameBuf = (unsigned char *)malloc(classifier->combinedBufSize);
+	
+	if (classifier->spsBuf == NULL || classifier->ppsBuf == NULL ||
+		classifier->seiBuf == NULL || classifier->combinedFrameBuf == NULL)
+	{
+		LOG_ERR("[H264FrameClassifier] Failed to allocate buffers\n");
+		if (classifier->spsBuf) free(classifier->spsBuf);
+		if (classifier->ppsBuf) free(classifier->ppsBuf);
+		if (classifier->seiBuf) free(classifier->seiBuf);
+		if (classifier->combinedFrameBuf) free(classifier->combinedFrameBuf);
+		free(classifier);
+		return NULL;
+	}
+	
+	LOG_DEBUG("[H264FrameClassifier] Created classifier, cache buf: %zu, combined buf: %zu\n",
+		classifier->cacheBufSize, classifier->combinedBufSize);
+	
+	return classifier;
+}
+
+void H264FrameClassifierDestroy(H264FrameClassifier_t *classifier)
+{
+	if (classifier == NULL)
+	{
+		return;
+	}
+	
+	if (classifier->spsBuf) free(classifier->spsBuf);
+	if (classifier->ppsBuf) free(classifier->ppsBuf);
+	if (classifier->seiBuf) free(classifier->seiBuf);
+	if (classifier->combinedFrameBuf) free(classifier->combinedFrameBuf);
+	
+	free(classifier);
+	LOG_DEBUG("[H264FrameClassifier] Classifier destroyed\n");
+}
+
+int H264FrameClassifierProcess(H264FrameClassifier_t *classifier, 
+                                const H264Frame_t *frame, 
+                                H264ClassifiedFrame_t *output)
+{
+	if (classifier == NULL || frame == NULL || output == NULL)
+	{
+		LOG_ERR("[H264FrameClassifier] Invalid parameters\n");
+		return -1;
+	}
+	
+	// 获取NALU类型
+	int naluType = H264GetNALUType(frame->data, frame->size);
+	if (naluType < 0)
+	{
+		LOG_DEBUG("[H264FrameClassifier] Failed to get NALU type\n");
+		return -1;
+	}
+	
+	// 处理不同类型的NALU
+	if (naluType == H264_NALU_TYPE_SPS)
+	{
+		// 缓存SPS
+		if (frame->size <= classifier->cacheBufSize)
+		{
+			memcpy(classifier->spsBuf, frame->data, frame->size);
+			classifier->spsLen = frame->size;
+			classifier->hasSps = 1;
+			LOG_DEBUG("[H264FrameClassifier] Cached SPS, length: %zu\n", frame->size);
+		}
+		return 1; // 需要继续处理，不输出帧
+	}
+	else if (naluType == H264_NALU_TYPE_PPS)
+	{
+		// 缓存PPS
+		if (frame->size <= classifier->cacheBufSize)
+		{
+			memcpy(classifier->ppsBuf, frame->data, frame->size);
+			classifier->ppsLen = frame->size;
+			classifier->hasPps = 1;
+			LOG_DEBUG("[H264FrameClassifier] Cached PPS, length: %zu\n", frame->size);
+		}
+		return 1; // 需要继续处理，不输出帧
+	}
+	else if (naluType == H264_NALU_TYPE_SEI)
+	{
+		// 缓存SEI（可选）
+		if (frame->size <= classifier->cacheBufSize)
+		{
+			memcpy(classifier->seiBuf, frame->data, frame->size);
+			classifier->seiLen = frame->size;
+			classifier->hasSei = 1;
+			LOG_DEBUG("[H264FrameClassifier] Cached SEI, length: %zu\n", frame->size);
+		}
+		return 1; // 需要继续处理，不输出帧
+	}
+	else if (naluType == H264_NALU_TYPE_IDR)
+	{
+		// IDR帧：组合SPS+PPS+SEI+IDR成完整I帧
+		int totalSize = 0;
+		if (classifier->hasSps) totalSize += classifier->spsLen;
+		if (classifier->hasPps) totalSize += classifier->ppsLen;
+		if (classifier->hasSei) totalSize += classifier->seiLen;
+		totalSize += frame->size;
+		
+		if (totalSize > (int)classifier->combinedBufSize)
+		{
+			LOG_ERR("[H264FrameClassifier] Combined I frame too large: %d bytes\n", totalSize);
+			return -1;
+		}
+		
+		// 组合帧
+		int offset = 0;
+		if (classifier->hasSps)
+		{
+			memcpy(classifier->combinedFrameBuf + offset, classifier->spsBuf, classifier->spsLen);
+			offset += classifier->spsLen;
+		}
+		if (classifier->hasPps)
+		{
+			memcpy(classifier->combinedFrameBuf + offset, classifier->ppsBuf, classifier->ppsLen);
+			offset += classifier->ppsLen;
+		}
+		if (classifier->hasSei)
+		{
+			memcpy(classifier->combinedFrameBuf + offset, classifier->seiBuf, classifier->seiLen);
+			offset += classifier->seiLen;
+		}
+		memcpy(classifier->combinedFrameBuf + offset, frame->data, frame->size);
+		offset += frame->size;
+		
+		// 清空SEI缓存（SPS/PPS保留，因为后续IDR可能还需要）
+		classifier->hasSei = 0;
+		classifier->seiLen = 0;
+		
+		LOG_DEBUG("[H264FrameClassifier] Combined I frame: SPS=%d, PPS=%d, SEI=%d, IDR=%zu, total=%d\n",
+			classifier->hasSps ? classifier->spsLen : 0, 
+			classifier->hasPps ? classifier->ppsLen : 0, 
+			classifier->hasSei ? classifier->seiLen : 0, 
+			frame->size, totalSize);
+		
+		// 输出组合后的I帧
+		output->data = classifier->combinedFrameBuf;
+		output->size = totalSize;
+		output->type = H264_FRAME_TYPE_I;
+		return 0; // 成功输出帧
+	}
+	else if (naluType == H264_NALU_TYPE_NON_IDR)
+	{
+		// NON_IDR帧：判断是P帧还是B帧
+		int sliceType = H264GetSliceType(frame->data, frame->size);
+		if (sliceType == 'P')
+		{
+			output->data = frame->data;
+			output->size = frame->size;
+			output->type = H264_FRAME_TYPE_P;
+			LOG_DEBUG("[H264FrameClassifier] P frame, size: %zu\n", frame->size);
+			return 0; // 成功输出帧
+		}
+		else if (sliceType == 'B')
+		{
+			output->data = frame->data;
+			output->size = frame->size;
+			output->type = H264_FRAME_TYPE_B;
+			LOG_DEBUG("[H264FrameClassifier] B frame, size: %zu\n", frame->size);
+			return 0; // 成功输出帧
+		}
+		else
+		{
+			// 无法判断或I slice，默认当作P帧处理
+			LOG_DEBUG("[H264FrameClassifier] Unknown slice type (%d), treating as P frame, size: %zu\n", 
+				sliceType, frame->size);
+			output->data = frame->data;
+			output->size = frame->size;
+			output->type = H264_FRAME_TYPE_P;
+			return 0; // 成功输出帧
+		}
+	}
+	else
+	{
+		// 其他类型的NALU（如AUD等），直接输出
+		LOG_DEBUG("[H264FrameClassifier] Other NALU type: %d, size: %zu\n", naluType, frame->size);
+		output->data = frame->data;
+		output->size = frame->size;
+		output->type = H264_FRAME_TYPE_OTHER;
+		return 0; // 成功输出帧
+	}
 }

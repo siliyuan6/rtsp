@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/prctl.h>
+#include <time.h>
 #include <arpa/inet.h>
 #include <ifaddrs.h>
 #include <net/if.h>
@@ -29,16 +30,25 @@
 #endif
 
 /**
+ * @brief 帧信息结构体（存储在ringbuf中）
+ */
+typedef struct {
+	unsigned int frameSize;        // 帧大小
+	H264FrameType_t frameType;     // 帧类型
+} RingbufFrameHeader_t;
+
+/**
  * @brief 应用程序上下文结构体
  */
 typedef struct {
-	H264Parser_t *h264_parser;    // H264解析器
-	RingBuffer_t *ringbuf;        // 环形缓冲区
-	RTSPHandle_t *rtsp_handle;    // RTSP句柄
-	pthread_t parseThread;        // 解析线程ID
-	int running;                  // 运行标志
-	char *streamFilePath;         // 流文件路径
-	int videoFps;                 // 帧率
+	H264Parser_t *h264ParserHandle;      // H264解析器
+	H264FrameClassifier_t *classifier;   // H264帧分类器
+	RingBuffer_t *ringbuf;               // 环形缓冲区
+	RTSPHandle_t *rtspHandle;            // RTSP句柄
+	pthread_t parseThread;               // 解析线程ID
+	int running;                         // 运行标志
+	char *streamFilePath;                // 流文件路径
+	int videoFps;                        // 帧率
 } AppContext_t;
 
 // 全局上下文指针（用于回调函数访问）
@@ -68,27 +78,122 @@ static void SignalHandler(int sig)
 }
 
 /**
- * @brief 推送帧数据到ringbuf
+ * @brief Pop最旧的一帧（用于覆盖写入）
+ * 
+ * @param rb ringbuf指针
+ * @return 成功返回0，失败返回-1（无数据可pop）
+ */
+static int PopOldestFrame(RingBuffer_t *rb)
+{
+	if (rb == NULL)
+	{
+		return -1;
+	}
+
+	// 检查是否有数据
+	if (RingBufferGetItemCount(rb) == 0)
+	{
+		return -1; // 无数据可pop
+	}
+
+	RingbufFrameHeader_t frameHeader;
+	unsigned char *tempBuf = NULL;
+
+	// 读取帧头（非阻塞）
+	int ret = RingBufferPop(rb, &frameHeader, sizeof(frameHeader), 0);
+	if (ret != 0 || frameHeader.frameSize == 0)
+	{
+		return -1; // 读取失败或无效长度
+	}
+
+	// 检查长度是否合理
+	if (frameHeader.frameSize > 4 * 1024 * 1024)
+	{
+		LOG_WARN("[PopOldestFrame] Frame size too large: %u, skipping\n", frameHeader.frameSize);
+		return -1;
+	}
+
+	// 分配临时缓冲区用于丢弃数据
+	tempBuf = (unsigned char *)malloc(frameHeader.frameSize);
+	if (tempBuf == NULL)
+	{
+		LOG_ERR("[PopOldestFrame] Failed to allocate temp buffer for frame size: %u\n", frameHeader.frameSize);
+		return -1;
+	}
+
+	// 读取并丢弃帧数据（非阻塞）
+	ret = RingBufferPop(rb, tempBuf, frameHeader.frameSize, 0);
+	free(tempBuf);
+
+	if (ret != 0)
+	{
+		LOG_DEBUG("[PopOldestFrame] Failed to pop frame data, ret=%d\n", ret);
+		return -1;
+	}
+
+	LOG_DEBUG("[PopOldestFrame] Popped oldest frame: size=%u, type=%d\n", 
+		frameHeader.frameSize, frameHeader.frameType);
+	return 0;
+}
+
+/**
+ * @brief 推送帧数据到ringbuf（覆盖写入模式）
+ * 
+ * 如果空间不足，会自动pop最旧的帧，直到有足够空间
  * 
  * @param rb ringbuf指针
  * @param frameData 帧数据指针
  * @param frameSize 帧大小
+ * @param frameType 帧类型
  * @return 成功返回0，失败返回-1
  */
 static int PushFrameToRingbuf(RingBuffer_t *rb, const unsigned char *frameData, 
-	size_t frameSize)
+	size_t frameSize, H264FrameType_t frameType)
 {
 	if (rb == NULL || frameData == NULL || frameSize == 0)
 	{
 		return -1;
 	}
 
-	// 先推送4字节的长度字段（主机字节序）
-	unsigned int frameSizeTmp = (unsigned int)frameSize;
-	int ret = RingBufferPush(rb, &frameSizeTmp, sizeof(frameSizeTmp));
+	// 计算需要的总空间：帧头（大小+类型） + 帧数据
+	size_t requiredSize = sizeof(RingbufFrameHeader_t) + frameSize;
+	size_t freeSize = RingBufferGetFreeSize(rb);
+
+	// 如果空间不足，pop最旧的帧直到有足够空间
+	int poppedCount = 0;
+	while (freeSize < requiredSize)
+	{
+		if (PopOldestFrame(rb) < 0)
+		{
+			// 无法pop更多帧（可能ringbuf已空），但仍然尝试写入
+			// RingBufferPush会在空间不足时阻塞等待，或者如果ringbuf已关闭则返回失败
+			if (poppedCount > 0)
+			{
+				LOG_DEBUG("[PushFrameToRingbuf] Popped %d old frame(s), freeSize=%zu, required=%zu\n",
+					poppedCount, freeSize, requiredSize);
+			}
+			break;
+		}
+		poppedCount++;
+		freeSize = RingBufferGetFreeSize(rb);
+	}
+	
+	if (poppedCount > 0)
+	{
+		LOG_DEBUG("[PushFrameToRingbuf] Popped %d old frame(s) to make room, new freeSize=%zu\n",
+			poppedCount, freeSize);
+	}
+
+	// 构造帧头
+	RingbufFrameHeader_t frameHeader;
+	frameHeader.frameSize = (unsigned int)frameSize;
+	frameHeader.frameType = frameType;
+
+	// 先推送帧头（包含大小和类型）
+	int ret = RingBufferPush(rb, &frameHeader, sizeof(frameHeader));
 	if (ret < 0)
 	{
-		LOG_ERR("[ParserThread] Failed to push frame size to ringbuf\n");
+		LOG_ERR("[PushFrameToRingbuf] Failed to push frame header to ringbuf\n");
 		return -1;
 	}
 
@@ -96,74 +201,13 @@ static int PushFrameToRingbuf(RingBuffer_t *rb, const unsigned char *frameData,
 	ret = RingBufferPush(rb, frameData, frameSize);
 	if (ret < 0)
 	{
-		LOG_ERR("[ParserThread] Failed to push frame data to ringbuf\n");
+		LOG_ERR("[PushFrameToRingbuf] Failed to push frame data to ringbuf\n");
 		return -1;
 	}
 
-	LOG_DEBUG("[ParserThread] Frame pushed: size=%zu, ringbuf usage: %zu/%zu\n",
-		frameSize, RingBufferGetUsedSize(rb), RingBufferGetUsedSize(rb) + RingBufferGetFreeSize(rb));
-
-	return 0;
-}
-
-/**
- * @brief 清空ringbuf中的所有数据项
- * 
- * 通过逐个读取并丢弃ringbuf中的数据项来清空ringbuf
- * 数据格式：4字节长度字段 + 帧数据
- * 
- * @param rb ringbuf指针
- * @return 成功返回0，失败返回-1
- */
-static int ClearRingbufAllItems(RingBuffer_t *rb)
-{
-	int ret = 0;
-	unsigned int itemLen = 0;
-	unsigned char *bufPtr = NULL;
-
-	if (rb == NULL)
-	{
-		LOG_ERR("Invalid ringbuf pointer\n");
-		return -1;
-	}
-
-	// 分配临时缓冲区用于丢弃数据
-	bufPtr = (unsigned char *)malloc(1024 * 1024); // 1MB临时缓冲区
-	if (bufPtr == NULL)
-	{
-		LOG_ERR("Failed to allocate temporary buffer for clearing ringbuf\n");
-		return -1;
-	}
-
-	// 循环读取并丢弃所有数据项
-	while (RingBufferGetItemCount(rb) > 0)
-	{
-		// 读取长度字段
-		ret = RingBufferPop(rb, &itemLen, sizeof(unsigned int), 100);
-		if (ret != 0 || itemLen <= 0)
-		{
-			LOG_DEBUG("Failed to read item length during ringbuf clear, ret=%d\n", ret);
-			break;
-		}
-
-		// 检查长度是否合理
-		if (itemLen > 1024 * 1024)
-		{
-			LOG_WARN("Item length too large: %u, skipping\n", itemLen);
-			break;
-		}
-
-		// 读取并丢弃数据
-		ret = RingBufferPop(rb, bufPtr, itemLen, 100);
-		if (ret != 0)
-		{
-			LOG_DEBUG("Failed to read item data during ringbuf clear, ret=%d\n", ret);
-			break;
-		}
-	}
-
-	free(bufPtr);
-	bufPtr = NULL;
+	LOG_DEBUG("[PushFrameToRingbuf] Frame pushed: size=%zu, ringbuf usage: %zu/%zu\n",
+		frameSize, RingBufferGetUsedSize(rb), 
+		RingBufferGetUsedSize(rb) + RingBufferGetFreeSize(rb));
 
 	return 0;
 }
@@ -171,7 +215,8 @@ static int ClearRingbufAllItems(RingBuffer_t *rb)
 /**
  * @brief 解析线程函数
  * 
- * 使用 h264_parser 解析码流文件，将帧推送到 ringbuf
+ * 使用 h264ParserHandle 解析码流文件，将帧推送到 ringbuf
+ * 使用帧分类器实现I帧组合（SPS+PPS+SEI+IDR）和P/B帧判断
  * 
  * @param arg 线程参数（AppContext_t*）
  * @return NULL
@@ -188,7 +233,7 @@ static void* ParseThread(void *arg)
 	LOG_INFO("[ParserThread] Thread started, parsing file: %s\n", ctx->streamFilePath);
 
 	// 分配帧缓冲区（用于拷贝帧数据，避免内部缓冲区被覆盖）
-	unsigned char *frameBuf = (unsigned char *)malloc(2 * 1024 * 1024); // 2MB
+	unsigned char *frameBuf = (unsigned char *)malloc(4 * 1024 * 1024); // 4MB（足够大以容纳组合后的I帧）
 	if (frameBuf == NULL)
 	{
 		LOG_ERR("[ParserThread] Failed to allocate frame buffer\n");
@@ -197,21 +242,13 @@ static void* ParseThread(void *arg)
 	}
 
 	H264Frame_t frame;
+	H264ClassifiedFrame_t classifiedFrame;
 
 	// 循环解析帧
 	while (ctx->running)
 	{
-		size_t freeSize = RingBufferGetFreeSize(ctx->ringbuf);
-		size_t minBufSize = 4 + 32; // 最小缓冲区需求：4字节长度 + 32字节帧数据
-		if (freeSize < minBufSize)
-		{
-			// 缓冲区空间不足，稍作等待
-			usleep(10*1000); // 10ms
-			continue;
-		}
-		
 		// 获取下一帧
-		int result = H264ParserNextFrame(ctx->h264_parser, &frame);
+		int result = H264ParserNextFrame(ctx->h264ParserHandle, &frame);
 		if (result < 0)
 		{
 			LOG_ERR("[ParserThread] Failed to get next frame\n");
@@ -225,30 +262,81 @@ static void* ParseThread(void *arg)
 		}
 
 		// 检查帧大小
-		if (frame.size > 2 * 1024 * 1024)
+		if (frame.size > 4 * 1024 * 1024)
 		{
 			LOG_ERR("[ParserThread] Frame too large: %zu bytes\n", frame.size);
 			continue;
 		}
 		
-		// 立即拷贝帧数据到缓冲区（因为 frame.data 指向内部缓冲区，可能被覆盖）
-		memcpy(frameBuf, frame.data, frame.size);
-
-		// 推送到 ringbuf（使用拷贝后的数据）
-		if (PushFrameToRingbuf(ctx->ringbuf, frameBuf, frame.size) < 0)
+		// 使用帧分类器处理帧
+		int classifyResult = H264FrameClassifierProcess(ctx->classifier, &frame, &classifiedFrame);
+		if (classifyResult < 0)
 		{
-			LOG_ERR("[ParserThread] Failed to push frame to ringbuf, stopping\n");
+			LOG_ERR("[ParserThread] Failed to classify frame\n");
+			continue;
+		}
+		else if (classifyResult > 0)
+		{
+			// 需要继续处理（如SPS/PPS/SEI被缓存），不输出帧
+			continue;
+		}
+		
+		// 成功分类，立即拷贝帧数据到缓冲区（因为 classifiedFrame.data 指向内部缓冲区，可能被覆盖）
+		if (classifiedFrame.size > 4 * 1024 * 1024)
+		{
+			LOG_ERR("[ParserThread] Classified frame too large: %zu bytes\n", classifiedFrame.size);
+			continue;
+		}
+		
+		memcpy(frameBuf, classifiedFrame.data, classifiedFrame.size);
+		
+		// 根据帧类型记录日志
+		const char *frameTypeStr = "Unknown";
+		switch (classifiedFrame.type)
+		{
+			case H264_FRAME_TYPE_I:
+				frameTypeStr = "I";
+				break;
+			case H264_FRAME_TYPE_P:
+				frameTypeStr = "P";
+				break;
+			case H264_FRAME_TYPE_B:
+				frameTypeStr = "B";
+				break;
+			case H264_FRAME_TYPE_OTHER:
+				frameTypeStr = "Other";
+				break;
+			default:
+				break;
+		}
+		
+		LOG_DEBUG("[ParserThread] %s frame, size: %zu\n", frameTypeStr, classifiedFrame.size);
+		
+		// 推送到 ringbuf（包含帧类型信息）
+		if (PushFrameToRingbuf(ctx->ringbuf, frameBuf, classifiedFrame.size, classifiedFrame.type) < 0)
+		{
+			LOG_ERR("[ParserThread] Failed to push %s frame to ringbuf, stopping\n", frameTypeStr);
 			break;
 		}
 
-		// 控制读取速度（根据FPS动态计算）
-		if (ctx->videoFps > 0)
+		// 获取上一帧到现在的时间，控制帧率
+		struct timespec tsTime;
+		clock_gettime(CLOCK_MONOTONIC, &tsTime);
+
+		static time_t lastFrameTimeUs = 0;
+		int expectSleepUs = ctx->videoFps > 0 ? (1000000 / ctx->videoFps) : 33333; // 默认30fps
+		if (lastFrameTimeUs != 0)
 		{
-			unsigned int sleep_us = 1000000 / ctx->videoFps;
-			usleep(sleep_us);
+			time_t elapsedUs = (tsTime.tv_sec * 1000000 + tsTime.tv_nsec / 1000 - lastFrameTimeUs);
+			if (elapsedUs < expectSleepUs)
+			{
+				usleep(expectSleepUs - elapsedUs);
+			}
 		}
+		lastFrameTimeUs = tsTime.tv_sec * 1000000 + tsTime.tv_nsec / 1000;
 	}
 
+	// 释放缓冲区
 	free(frameBuf);
 
 	LOG_INFO("[ParserThread] Thread exited, total frames parsed");
@@ -259,102 +347,142 @@ static void* ParseThread(void *arg)
  * @brief 数据回调函数
  * 
  * 从循环队列中读取H.264帧数据（读取完整一帧）
- * 根据push规则：先读取4字节长度字段，再读取对应长度的帧数据
+ * 根据push规则：先读取帧头（大小+类型），再读取对应长度的帧数据
  * 
- * @param buf 数据缓冲区
- * @param bufSize 缓冲区大小
- * @return 成功返回数据长度，失败返回-1，无数据返回0
+ * @param frameInfo 输出参数，返回帧信息（地址、长度、类型）
+ * @return 成功返回0，失败返回-1，无数据返回1
  */
-static int GetDataCallback(unsigned char *buf, unsigned int bufSize)
+static int GetDataCallback(FrameInfo_t *frameInfo)
 {
 	int ret = 0;
-	unsigned int frameSize = 0;
-	static int lastRtpSessionState = 0; // 上次RTP会话状态
+	RingbufFrameHeader_t frameHeader;
+	static unsigned char *frameBuf = NULL;
+	static size_t frameBufSize = 0;
 
-	if (NULL == buf || bufSize <= 0)
+	if (frameInfo == NULL)
 	{
 		return -1;
 	}
 
-	// 如果上下文未初始化，返回0（无数据）
+	// 初始化输出参数
+	frameInfo->data = NULL;
+	frameInfo->size = 0;
+	frameInfo->type = H264_FRAME_TYPE_NONE;
+
+	// 如果上下文未初始化，返回无数据
 	if (g_appCtx == NULL || g_appCtx->ringbuf == NULL)
 	{
-		return 0;
+		return 1; // 无数据
 	}
 
-	// 检测RTP会话状态变化：如果从非活跃变为活跃，说明是新客户端连接成功
-	// 在第一次getData调用前清空ringbuf，保证数据是实时的
-	int justCleared = 0;
-	if (g_appCtx->rtsp_handle != NULL)
+	// 分配或扩展帧缓冲区（如果需要）
+	if (frameBuf == NULL || frameBufSize < 4 * 1024 * 1024)
 	{
-		int currentRtpSessionState = 0;
-		// 使用互斥锁安全访问hasActiveRtpSession
-		pthread_mutex_lock(&g_appCtx->rtsp_handle->mutex);
-		currentRtpSessionState = g_appCtx->rtsp_handle->hasActiveRtpSession;
-		pthread_mutex_unlock(&g_appCtx->rtsp_handle->mutex);
-		
-		// 如果RTP会话从非活跃变为活跃，清空ringbuf
-		if (currentRtpSessionState == 1 && lastRtpSessionState == 0)
+		if (frameBuf != NULL)
 		{
-			LOG_INFO("[GetDataCallback] New RTSP client connected, clearing ringbuf to ensure real-time data\n");
-			if (ClearRingbufAllItems(g_appCtx->ringbuf) < 0)
-			{
-				LOG_ERR("Failed to clear ringbuf\n");
-				return -1;
-			}
-			justCleared = 1;
+			free(frameBuf);
 		}
-		lastRtpSessionState = currentRtpSessionState;
+		frameBufSize = 4 * 1024 * 1024; // 4MB
+		frameBuf = (unsigned char *)malloc(frameBufSize);
+		if (frameBuf == NULL)
+		{
+			LOG_ERR("[GetDataCallback] Failed to allocate frame buffer\n");
+			return -1;
+		}
 	}
 
-	// 第一步：从ringbuf读取4字节长度字段（主机字节序）
-	ret = RingBufferPop(g_appCtx->ringbuf, &frameSize, sizeof(frameSize), 100);
+	// 第一步：从ringbuf读取帧头（包含大小和类型）
+	ret = RingBufferPop(g_appCtx->ringbuf, &frameHeader, sizeof(frameHeader), 100);
 	if (ret != 0)
 	{
 		// 超时或错误
-		return (ret == 1) ? 0 : -1;
+		return (ret == 1) ? 1 : -1; // 1表示无数据，-1表示错误
 	}
 	
 	// 检查帧大小是否合理
-	if ((frameSize == 0) || (frameSize > 10 * 1024 * 1024))
+	if ((frameHeader.frameSize == 0) || (frameHeader.frameSize > 4 * 1024 * 1024))
 	{
-		// 如果刚清空过ringbuf，可能是残留的不完整数据，返回0等待新数据
-		if (justCleared)
-		{
-			LOG_DEBUG("[GetDataCallback] Invalid frame size after clear: %u, waiting for new data\n", frameSize);
-			// 将无效的长度字段放回ringbuf（实际上无法放回，所以直接清空ringbuf并返回0）
-			RingBufferClear(g_appCtx->ringbuf);
-			return 0;
-		}
-		LOG_ERR("Invalid frame size: %u\n", frameSize);
+		LOG_ERR("[GetDataCallback] Invalid frame size: %u\n", frameHeader.frameSize);
 		return -1;
 	}
 	
-	// 检查缓冲区是否足够
-	if (bufSize < frameSize)
+	// 检查缓冲区是否足够，如果不够则扩展
+	if (frameBufSize < frameHeader.frameSize)
 	{
-		LOG_ERR("Buffer too small: need %u bytes, got %u bytes\n", frameSize, bufSize);
-		return -1;
+		free(frameBuf);
+		frameBufSize = frameHeader.frameSize;
+		frameBuf = (unsigned char *)malloc(frameBufSize);
+		if (frameBuf == NULL)
+		{
+			LOG_ERR("[GetDataCallback] Failed to allocate frame buffer for size: %u\n", frameHeader.frameSize);
+			return -1;
+		}
 	}
 	
 	// 第二步：从ringbuf读取完整帧数据
-	ret = RingBufferPop(g_appCtx->ringbuf, buf, frameSize, 100);
+	ret = RingBufferPop(g_appCtx->ringbuf, frameBuf, frameHeader.frameSize, 100);
 	if (ret != 0)
 	{
-		LOG_ERR("Failed to read complete frame, expected %u bytes\n", frameSize);
-		return (ret == 1) ? 0 : -1;
+		LOG_ERR("[GetDataCallback] Failed to read complete frame, expected %u bytes\n", frameHeader.frameSize);
+		return (ret == 1) ? 1 : -1;
 	}
 	
-	// 打印ringbuf数据信息
-	size_t data_size = RingBufferGetUsedSize(g_appCtx->ringbuf);
-	size_t free_size = RingBufferGetFreeSize(g_appCtx->ringbuf);
-	size_t capacity = data_size + free_size;
-	double usage = capacity > 0 ? (double)data_size * 100.0 / capacity : 0.0;
-	LOG_DEBUG("[RingBuf Pop] Frame: %u bytes, DataSize: %zu bytes, FreeSize: %zu bytes, Usage: %.2f%%\n",
-		frameSize, data_size, free_size, usage);
+	// 设置输出参数
+	frameInfo->data = frameBuf;
+	frameInfo->size = frameHeader.frameSize;
+	frameInfo->type = frameHeader.frameType;
 	
-	// 返回完整帧长度
-	return (int)frameSize;
+	// 打印ringbuf数据信息
+	size_t usedSize = RingBufferGetUsedSize(g_appCtx->ringbuf);
+	size_t freeSize = RingBufferGetFreeSize(g_appCtx->ringbuf);
+	size_t capacity = usedSize + freeSize;
+	double usage = capacity > 0 ? (double)usedSize * 100.0 / capacity : 0.0;
+	
+	const char *frameTypeStr = "Unknown";
+	switch (frameHeader.frameType)
+	{
+		case H264_FRAME_TYPE_I:
+			frameTypeStr = "I";
+			break;
+		case H264_FRAME_TYPE_P:
+			frameTypeStr = "P";
+			break;
+		case H264_FRAME_TYPE_B:
+			frameTypeStr = "B";
+			break;
+		case H264_FRAME_TYPE_OTHER:
+			frameTypeStr = "Other";
+			break;
+		default:
+			break;
+	}
+	
+	LOG_DEBUG("[GetDataCallback] Frame: %s, size=%u, ringbuf usage: %.2f%%\n",
+		frameTypeStr, frameHeader.frameSize, usage);
+	
+	// 返回成功
+	return 0;
+}
+
+/**
+ * @brief RTCP统计回调函数
+ */
+static void RTCPStatsCallback(const RTCPStats_t *stats, void *userData)
+{
+	(void) userData;
+	if (stats == NULL)
+	{
+		return;
+	}
+	LOG_WARN("[RTCPStats] SSRC: %u, FractionLost: %u, CumulativePacketsLost: %u, "
+		"ExtendedHighestSeq: %u, Jitter: %u, LastSRTimestamp: %u, DelaySinceLastSR: %u\n",
+		stats->ssrc,                  // SSRC
+		stats->fractionLost,          // 丢包率
+		stats->cumulativePacketsLost, // 累计丢包数
+		stats->extendedHighestSeq,    // 最高序列号
+		stats->jitter,                // 抖动
+		stats->lastSRTimestamp,       // 最后SR时间戳
+		stats->delaySinceLastSR);     // 自上次SR的延迟
 }
 
 /**
@@ -477,8 +605,22 @@ int main(int argc, char *argv[])
 		LOG_ERR("Failed to allocate memory for stream file path\n");
 		return -1;
 	}
-	ctx.h264_parser = H264ParserCreate(ctx.streamFilePath, 0, 1); // loop_enabled=1
-	if (ctx.h264_parser == NULL)
+	ctx.h264ParserHandle = H264ParserCreate(ctx.streamFilePath, 0, 1); // loop_enabled=1
+	if (ctx.h264ParserHandle == NULL)
+	{
+		LOG_ERR("Failed to create H264 parser\n");
+		return -1;
+	}
+	
+	// 创建帧分类器
+	ctx.classifier = H264FrameClassifierCreate(0); // 使用默认缓冲区大小
+	if (ctx.classifier == NULL)
+	{
+		LOG_ERR("Failed to create H264 frame classifier\n");
+		H264ParserDestroy(ctx.h264ParserHandle);
+		return -1;
+	}
+	if (ctx.h264ParserHandle == NULL)
 	{
 		LOG_ERR("Failed to create H264 parser\n");
 		free(ctx.streamFilePath);
@@ -491,33 +633,49 @@ int main(int argc, char *argv[])
 	if (ctx.ringbuf == NULL)
 	{
 		LOG_ERR("Failed to create ring buffer\n");
-		H264ParserDestroy(ctx.h264_parser);
+		H264FrameClassifierDestroy(ctx.classifier);
+		H264ParserDestroy(ctx.h264ParserHandle);
 		free(ctx.streamFilePath);
 		return -1;
 	}
 	LOG_INFO("Ring buffer created, size: %zu bytes\n", ringbuf_size);
 
 	// 3. 创建RTSP服务器（传入GetDataCallback）
-	ret = RTSPCreate(&ctx.rtsp_handle, &config, GetDataCallback);
+	ret = RTSPCreate(&ctx.rtspHandle, &config, GetDataCallback);
 	if (ret < 0)
 	{
 		LOG_ERR("RTSPCreate failed\n");
 		RingBufferDestroy(ctx.ringbuf);
-		H264ParserDestroy(ctx.h264_parser);
+		H264FrameClassifierDestroy(ctx.classifier);
+		H264ParserDestroy(ctx.h264ParserHandle);
 		free(ctx.streamFilePath);
 		return -1;
 	}
 	LOG_INFO("RTSP server created\n");
 
-	// 4. 创建解析线程（从H264解析器取帧推送到ringbuf）
+	// 4. 配置RTCP统计回调
+	ret = RTSPSetRTCPStatsCallback(ctx.rtspHandle, RTCPStatsCallback, NULL);
+	if (ret != 0)
+	{
+		LOG_ERR("Failed to set RTCP stats callback\n");
+		RTSPDestroy(ctx.rtspHandle);
+		RingBufferDestroy(ctx.ringbuf);
+		H264FrameClassifierDestroy(ctx.classifier);
+		H264ParserDestroy(ctx.h264ParserHandle);
+		free(ctx.streamFilePath);
+		return -1;
+	}
+
+	// 5. 创建解析线程（从H264解析器取帧推送到ringbuf）
 	ctx.running = 1;
 	ret = pthread_create(&ctx.parseThread, NULL, ParseThread, &ctx);
 	if (ret != 0)
 	{
 		LOG_ERR("Failed to create parse thread\n");
-		RTSPDestroy(ctx.rtsp_handle);
+		RTSPDestroy(ctx.rtspHandle);
 		RingBufferDestroy(ctx.ringbuf);
-		H264ParserDestroy(ctx.h264_parser);
+		H264FrameClassifierDestroy(ctx.classifier);
+		H264ParserDestroy(ctx.h264ParserHandle);
 		free(ctx.streamFilePath);
 		return -1;
 	}
@@ -548,9 +706,9 @@ int main(int argc, char *argv[])
 		sleep(5);
 
 		// 检查RTSP状态
-		if (ctx.rtsp_handle != NULL)
+		if (ctx.rtspHandle != NULL)
 		{
-			ret = RTSPGetStatus(ctx.rtsp_handle, &status);
+			ret = RTSPGetStatus(ctx.rtspHandle, &status);
 			if (ret == 0)
 			{
 				if (status == RTSP_STATUS_STOPPED)
@@ -601,10 +759,10 @@ int main(int argc, char *argv[])
 	}
 
 	// 销毁RTSP
-	if (ctx.rtsp_handle != NULL)
+	if (ctx.rtspHandle != NULL)
 	{
-		RTSPDestroy(ctx.rtsp_handle);
-		ctx.rtsp_handle = NULL;
+		RTSPDestroy(ctx.rtspHandle);
+		ctx.rtspHandle = NULL;
 		LOG_INFO("RTSP destroyed\n");
 	}
 
@@ -617,10 +775,10 @@ int main(int argc, char *argv[])
 	}
 
 	// 销毁H264解析器
-	if (ctx.h264_parser != NULL)
+	if (ctx.h264ParserHandle != NULL)
 	{
-		H264ParserDestroy(ctx.h264_parser);
-		ctx.h264_parser = NULL;
+		H264ParserDestroy(ctx.h264ParserHandle);
+		ctx.h264ParserHandle = NULL;
 		LOG_INFO("H264 parser destroyed\n");
 	}
 
