@@ -1,6 +1,6 @@
 /**
- * @file file_parser_sample.c
- * @brief H264 码流解析示例程序
+ * @file h264_parser_sample.c
+ * @brief H.264 码流解析示例程序
  * 
  * 演示如何使用 h264_parser 解析码流文件并通过 ringbuf 进行数据传输
  * 
@@ -56,7 +56,7 @@ static int PushFrameToRingbuf(RingBuffer_t *rb, const unsigned char *frameData, 
     int ret = RingBufferPush(rb, &frameSizeTmp, sizeof(frameSizeTmp));
     if (ret < 0)
     {
-        LOG_ERR("[ParserThread] Failed to push frame size to ringbuf\n");
+        LOG_ERR("[H264ParserThread] Failed to push frame size to ringbuf\n");
         return -1;
     }
 
@@ -64,11 +64,11 @@ static int PushFrameToRingbuf(RingBuffer_t *rb, const unsigned char *frameData, 
     ret = RingBufferPush(rb, frameData, frameSize);
     if (ret < 0)
     {
-        LOG_ERR("[ParserThread] Failed to push frame data to ringbuf\n");
+        LOG_ERR("[H264ParserThread] Failed to push frame data to ringbuf\n");
         return -1;
     }
 
-    LOG_DEBUG("[ParserThread] Frame pushed: size=%zu, ringbuf usage: %zu/%zu\n",
+    LOG_DEBUG("[H264ParserThread] Frame pushed: size=%zu, ringbuf usage: %zu/%zu\n",
         frameSize, RingBufferGetUsedSize(rb), RingBufferGetUsedSize(rb) + RingBufferGetFreeSize(rb));
 
     return 0;
@@ -88,16 +88,16 @@ static void* ParseThread(void *arg)
     int ret = prctl(PR_SET_NAME, "H264Parser", 0, 0, 0);
     if (ret != 0)
     {
-        LOG_WARN("[ParserThread] Failed to set thread name\n");
+        LOG_WARN("[H264ParserThread] Failed to set thread name\n");
     }
 
-    LOG_INFO("[ParserThread] Thread started, parsing file: %s\n", params->input_file);
+    LOG_INFO("[H264ParserThread] Thread started, parsing H.264 file: %s\n", params->input_file);
 
     // 创建 H264 解析器
     g_parser = H264ParserCreate(params->input_file, 0, params->loop_enabled);
     if (g_parser == NULL)
     {
-        LOG_ERR("[ParserThread] Failed to create H264 parser\n");
+        LOG_ERR("[H264ParserThread] Failed to create H.264 parser\n");
         g_running = 0;
         return NULL;
     }
@@ -106,7 +106,7 @@ static void* ParseThread(void *arg)
     unsigned char *frameBuf = (unsigned char *)malloc(2 * 1024 * 1024); // 2MB
     if (frameBuf == NULL)
     {
-        LOG_ERR("[ParserThread] Failed to allocate frame buffer\n");
+        LOG_ERR("[H264ParserThread] Failed to allocate frame buffer\n");
         H264ParserDestroy(g_parser);
         g_parser = NULL;
         g_running = 0;
@@ -123,20 +123,20 @@ static void* ParseThread(void *arg)
         int result = H264ParserNextFrame(g_parser, &frame);
         if (result < 0)
         {
-            LOG_ERR("[ParserThread] Failed to get next frame\n");
+            LOG_ERR("[H264ParserThread] Failed to get next frame\n");
             break;
         }
         else if (result > 0)
         {
             // EOF（仅在 loop_enabled=0 时）
-            LOG_INFO("[ParserThread] End of file reached, total frames: %d\n", frame_count);
+            LOG_INFO("[H264ParserThread] End of file reached, total frames: %d\n", frame_count);
             break;
         }
 
         // 检查帧大小
         if (frame.size > 2 * 1024 * 1024)
         {
-            LOG_ERR("[ParserThread] Frame too large: %zu bytes\n", frame.size);
+            LOG_ERR("[H264ParserThread] Frame too large: %zu bytes\n", frame.size);
             continue;
         }
         
@@ -146,14 +146,14 @@ static void* ParseThread(void *arg)
         // 推送到 ringbuf（使用拷贝后的数据）
         if (PushFrameToRingbuf(g_ringbuf, frameBuf, frame.size) < 0)
         {
-            LOG_ERR("[ParserThread] Failed to push frame to ringbuf, stopping\n");
+            LOG_ERR("[H264ParserThread] Failed to push frame to ringbuf, stopping\n");
             break;
         }
 
         frame_count++;
         if (frame_count % 10000 == 0)
         {
-            LOG_INFO("[ParserThread] Parsed %d frames\n", frame_count);
+            LOG_INFO("[H264ParserThread] Parsed %d H.264 frames\n", frame_count);
         }
     }
 
@@ -161,7 +161,7 @@ static void* ParseThread(void *arg)
     H264ParserDestroy(g_parser);
     g_parser = NULL;
 
-    LOG_INFO("[ParserThread] Thread exited, total frames parsed: %d\n", frame_count);
+    LOG_INFO("[H264ParserThread] Thread exited, total H.264 frames parsed: %d\n", frame_count);
     return NULL;
 }
 
@@ -304,7 +304,7 @@ int main(int argc, char *argv[])
     if (argc < 3)
     {
         printf("Usage: %s <input_file> <output_file> [ringbuf_size] [loop_enabled] [debug]\n", argv[0]);
-        printf("  input_file:    H264 stream file path\n");
+        printf("  input_file:    H.264 stream file path\n");
         printf("  output_file:   Output file path\n");
         printf("  ringbuf_size:  Ring buffer size in bytes (default: 2MB)\n");
         printf("  loop_enabled:  Enable loop reading (1=enabled, 0=disabled, default: 0)\n");
@@ -340,7 +340,7 @@ int main(int argc, char *argv[])
     signal(SIGINT, SignalHandler);
     signal(SIGTERM, SignalHandler);
 
-    LOG_INFO("[Main] Starting H264 file parser sample\n");
+    LOG_INFO("[Main] Starting H.264 file parser sample\n");
     LOG_INFO("[Main] Input file: %s\n", input_file);
     LOG_INFO("[Main] Output file: %s\n", output_file);
     LOG_INFO("[Main] Ringbuf size: %zu bytes\n", ringbuf_size);

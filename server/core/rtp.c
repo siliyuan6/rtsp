@@ -546,26 +546,26 @@ int RTPSendDataUdp(int rtpFd, struct sockaddr_in *clientAddr,
 		// - 小帧（<=10包）：每个包后延时50微秒
 		// - 中帧（11-50包）：每个包后延时100微秒
 		// - 大帧（>50包）：每个包后延时150微秒，每10个包额外延时50微秒
-		if (i < packetCount - 1) // 最后一个包不需要延时
-		{
-			if (packetCount <= 10)
-			{
-				usleep(50); // 50微秒
-			}
-			else if (packetCount <= 50)
-			{
-				usleep(100); // 100微秒
-			}
-			else
-			{
-				usleep(150); // 150微秒
-				// 大帧每10个包额外延时
-				if ((i + 1) % 10 == 0)
-				{
-					usleep(50); // 额外50微秒
-				}
-			}
-		}
+		// if (i < packetCount - 1) // 最后一个包不需要延时
+		// {
+		// 	if (packetCount <= 10)
+		// 	{
+		// 		usleep(50); // 50微秒
+		// 	}
+		// 	else if (packetCount <= 50)
+		// 	{
+		// 		usleep(100); // 100微秒
+		// 	}
+		// 	else
+		// 	{
+		// 		usleep(150); // 150微秒
+		// 		// 大帧每10个包额外延时
+		// 		if ((i + 1) % 10 == 0)
+		// 		{
+		// 			usleep(50); // 额外50微秒
+		// 		}
+		// 	}
+		// }
 	}
 
 	// 释放所有包的内存
